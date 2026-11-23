@@ -22,8 +22,11 @@ Everything else takes outside PRs:
 
 Golden-image compare, the frozen export-list parse, the doc-vs-header drift check and
 the MCP protocol over stdio. It must pass before any change to `mcp/` or `skills/` is
-merged; CI runs the same, plus a compile-and-screenshot of `sdk/games/echo`, on Windows
-and Linux.
+merged. There is no hosted CI here, so run it yourself on your OS; a change that touches
+the build is also checked by hand where it can run:
+
+    python sdk/tools/emu/emu.py shot echo "wait 1; tap 233 233; wait 1; shot check.png"
+
 
 ## House style
 

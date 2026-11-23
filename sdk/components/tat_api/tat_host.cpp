@@ -1,0 +1,637 @@
+#include "tat/tat_host.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+#include "audio/audio.h"
+#include "console/banner.h"
+#include "console/console.h"
+#include "console/pause_menu.h"
+#include "console/ui.h"
+#include "engine/canvas.h"
+#include "engine/gestures.h"
+#include "engine/polar.h"
+#include "engine/store.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "loader/loader.h"
+
+namespace tat {
+
+namespace {
+
+const char *TAG = "tat";
+
+// Everything the api functions need that they are not passed. A game never sees any of
+// this; it exists because the C table has nowhere to carry state.
+struct Host {
+    wc::Engine *engine = nullptr;
+    const tat_game_t *game = nullptr;
+    wc::Gestures gestures;
+    console::ui::PauseMenu menu;
+    tat_input_t input{};
+    tat_gestures_t ges{};
+
+    // What the resident game has taken, so unloading it gives everything back. One game
+    // at a time owns these lists: whoever loads packages keeps it that way.
+    HostedGame *owner = nullptr;
+    std::vector<void *> allocations;
+    std::vector<wc::Canvas *> canvases;
+    std::vector<wc::Sheet *> sheets;
+};
+
+Host s;
+
+// ---- the api, function by function
+
+tat_color_t api_rgb(uint8_t r, uint8_t g, uint8_t b) { return wc::rgb(r, g, b); }
+
+void api_log(const char *fmt, ...)
+{
+    char line[160];
+    va_list ap;
+    va_start(ap, fmt);
+    // fmt comes from the game's own log calls; bounded to line, and games are installed
+    // deliberately - a hostile package is outside the loader's threat model anyway.
+    vsnprintf(line, sizeof(line), fmt, ap); // flawfinder: ignore
+    va_end(ap);
+    ESP_LOGI(s.game ? s.game->id : TAG, "%s", line);
+}
+
+int64_t api_now_us() { return esp_timer_get_time(); }
+uint32_t api_random() { return esp_random(); }
+const tat_input_t *api_input() { return &s.input; }
+const tat_gestures_t *api_gestures() { return &s.ges; }
+float api_tilt_sensitivity() { return console::tiltSensGain(); }
+
+// Set through api_set_evict_hook (which lives outside the anonymous namespace so the
+// console can wire it); the hook itself only touches main's debugger caches.
+static void (*s_evict)(void);
+
+void *api_alloc(size_t bytes)
+{
+    void *p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (!p && s_evict) {
+        // Fragmentation, not just exhaustion, is why a 4 MB ask can fail next to a
+        // couple of megabytes free. What the debugger holds - a captured frame, its
+        // delta twin - is the largest discretionary block, and it is only needed
+        // while someone is watching the screen.
+        ESP_LOGI(TAG, "alloc of %u bytes failed; freeing the debug caches", (unsigned)bytes);
+        s_evict();
+        p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    }
+    if (p) s.allocations.push_back(p);
+    return p;
+}
+
+void api_free(void *p)
+{
+    if (!p) return;
+    for (auto it = s.allocations.begin(); it != s.allocations.end(); ++it) {
+        if (*it == p) {
+            s.allocations.erase(it);
+            break;
+        }
+    }
+    heap_caps_free(p);
+}
+
+tat_canvas_t *api_canvas_create(int scale, int size)
+{
+    auto *c = new wc::Canvas();
+    if (!c->init(scale, size)) {
+        delete c;
+        return nullptr;
+    }
+    s.canvases.push_back(c);
+    return reinterpret_cast<tat_canvas_t *>(c);
+}
+
+wc::Canvas *cv(tat_canvas_t *c)
+{
+    // Handles are real pointers into console memory, so a stale or invented one would
+    // write firmware memory if dereferenced. Every object this game created is on the
+    // host's lists; anything else is refused rather than used. Refusals log once per
+    // handle, not once per frame: a broken game that keeps asking must not flush the
+    // /log ring.
+    static const void *last;
+    for (wc::Canvas *known : s.canvases)
+        if (known == reinterpret_cast<wc::Canvas *>(c)) return known;
+    if (c && c != last) {
+        last = c;
+        ESP_LOGW(TAG, "a canvas the console did not hand out (%p) was refused", c);
+    }
+    return nullptr;
+}
+
+wc::Sheet *sh(tat_sheet_t *x)
+{
+    static const void *last;
+    for (wc::Sheet *known : s.sheets)
+        if (known == reinterpret_cast<wc::Sheet *>(x)) return known;
+    if (x && x != last) {
+        last = x;
+        ESP_LOGW(TAG, "a sheet the console did not hand out (%p) was refused", x);
+    }
+    return nullptr;
+}
+
+void api_canvas_destroy(tat_canvas_t *c)
+{
+    wc::Canvas *k = cv(c);
+    if (!k) return;
+    for (auto it = s.canvases.begin(); it != s.canvases.end(); ++it) {
+        if (*it == k) {
+            s.canvases.erase(it);
+            break;
+        }
+    }
+    delete k;
+}
+
+int api_canvas_width(tat_canvas_t *c) { wc::Canvas *k = cv(c); return k ? k->width() : 0; }
+uint8_t *api_canvas_pixels(tat_canvas_t *c) { wc::Canvas *k = cv(c); return k ? k->pixels() : nullptr; }
+uint8_t api_canvas_color(tat_canvas_t *c, tat_color_t rgb)
+{
+    wc::Canvas *k = cv(c);
+    return k ? k->color(rgb) : 0;
+}
+uint8_t api_canvas_reserve(tat_canvas_t *c, int n)
+{
+    wc::Canvas *k = cv(c);
+    return k ? k->reserve(n) : 0;
+}
+void api_canvas_set_color(tat_canvas_t *c, uint8_t i, tat_color_t rgb)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->setColor(i, rgb);
+}
+void api_canvas_clear(tat_canvas_t *c, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->clear(i);
+}
+void api_canvas_pixel(tat_canvas_t *c, int x, int y, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->pixel(x, y, i);
+}
+void api_canvas_fill_rect(tat_canvas_t *c, int x, int y, int w, int h, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->fillRect(x, y, w, h, i);
+}
+void api_canvas_rect(tat_canvas_t *c, int x, int y, int w, int h, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->rect(x, y, w, h, i);
+}
+void api_canvas_line(tat_canvas_t *c, int x0, int y0, int x1, int y1, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->line(x0, y0, x1, y1, i);
+}
+void api_canvas_fill_circle(tat_canvas_t *c, int x, int y, int r, uint8_t i)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->fillCircle(x, y, r, i);
+}
+
+int api_canvas_text(tat_canvas_t *c, int x, int y, const char *t, uint8_t i, int scale, bool bold)
+{
+    wc::Canvas *k = cv(c);
+    return k ? k->text(x, y, t, i, scale, bold) : 0;
+}
+
+void api_canvas_text_centered(tat_canvas_t *c, int x, int y, const char *t, uint8_t i, int scale, bool bold)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->textCentered(x, y, t, i, scale, bold);
+}
+
+tat_sheet_t *api_sheet_load(tat_canvas_t *c, const void *png, size_t len, int fw, int fh)
+{
+    wc::Canvas *k = cv(c);
+    if (!k) return nullptr;
+    auto *sheet = new wc::Sheet();
+    if (!k->loadSheet(*sheet, static_cast<const uint8_t *>(png), len, fw, fh)) {
+        delete sheet;
+        return nullptr;
+    }
+    s.sheets.push_back(sheet);
+    return reinterpret_cast<tat_sheet_t *>(sheet);
+}
+
+void api_canvas_sprite(tat_canvas_t *c, tat_sheet_t *x, int frame, int px, int py, bool flip)
+{
+    wc::Canvas *k = cv(c);
+    wc::Sheet *sp = sh(x);
+    if (k && sp) k->sprite(*sp, frame, px, py, flip);
+}
+
+void api_canvas_sprite_scaled(tat_canvas_t *c, tat_sheet_t *x, int frame, float px, float py, float sx,
+                              float sy, bool flip)
+{
+    wc::Canvas *k = cv(c);
+    wc::Sheet *sp = sh(x);
+    if (k && sp) k->spriteScaled(*sp, frame, px, py, sx, sy, flip);
+}
+
+void api_canvas_present(tat_canvas_t *c)
+{
+    wc::Canvas *k = cv(c);
+    if (k && s.engine) k->present(s.engine->presenter());
+}
+
+void api_canvas_present_rotated(tat_canvas_t *c, float radians)
+{
+    wc::Canvas *k = cv(c);
+    if (k && s.engine) k->presentRotated(s.engine->presenter(), radians);
+}
+
+void api_menu_open() { s.menu.open(); }
+void api_menu_close() { s.menu.close(); }
+bool api_menu_is_open() { return s.menu.isOpen(); }
+void api_menu_invalidate() { s.menu.invalidate(); }
+
+int api_menu_update()
+{
+    if (!s.engine) return TAT_MENU_NONE;
+    const int r = s.menu.update(*s.engine, s.gestures, s.engine->input());
+    // The console's values happen to line up with the game-facing ones; say so out loud
+    // rather than relying on it.
+    static_assert(int(console::ui::PauseMenu::None) == TAT_MENU_NONE, "menu None must match");
+    static_assert(int(console::ui::PauseMenu::Closed) == TAT_MENU_CLOSED, "menu Closed must match");
+    return r;
+}
+
+void api_menu_draw(const tat_menu_row_t *rows, int count, const char *title)
+{
+    console::ui::PauseMenu::Row out[4];
+    if (count > 4) count = 4;
+    for (int i = 0; i < count; i++) {
+        out[i].label = rows[i].label;
+        out[i].value = rows[i].value;
+        out[i].color = rows[i].color ? rows[i].color : console::ui::VALUE;
+    }
+    if (s.engine) s.menu.draw(s.engine->gfx(), out, count, title ? title : "PAUSED");
+}
+
+tat_menu_row_t api_menu_sound_row()
+{
+    const auto r = s.menu.soundRow();
+    return {r.label, r.value, r.color};
+}
+
+void api_menu_toggle_sound() { s.menu.toggleSound(); }
+
+tat_color_t api_ui_color(int which)
+{
+    namespace ui = console::ui;
+    switch (which) {
+    case TAT_UI_LABEL: return ui::LABEL;
+    case TAT_UI_DIM: return ui::DIM;
+    case TAT_UI_VALUE: return ui::VALUE;
+    case TAT_UI_ACCENT: return ui::ACCENT;
+    case TAT_UI_GO: return ui::GO;
+    case TAT_UI_DANGER: return ui::DANGER;
+    default: return ui::TEXT;
+    }
+}
+
+void api_tone(const tat_tone_t *t)
+{
+    wc::audio::play({.f0 = t->f0,
+                     .f1 = t->f1,
+                     .ms = t->ms,
+                     .wave = wc::audio::Wave(t->wave),
+                     .volume = t->volume,
+                     .delay_ms = t->delay_ms});
+}
+
+int api_volume() { return wc::audio::volume(); }
+
+// ---- added in 1.6: the game's own PCM render, straight through to the mixer
+
+int api_audio_start(int rate) { return wc::audio::streamStart(rate); }
+
+int api_audio_push(const int16_t *samples, int count) { return wc::audio::streamWrite(samples, count); }
+
+int api_audio_space() { return wc::audio::streamSpace(); }
+
+void api_audio_stop() { wc::audio::streamStop(); }
+
+void api_save_get(const char *key, int *value, int limit)
+{
+    if (!s.game) return;
+    wc::Store store(s.game->id);
+    store.get(key, *value, limit);
+}
+
+void api_save_set(const char *key, int value)
+{
+    if (!s.game) return;
+    wc::Store store(s.game->id, wc::Store::Write);
+    store.set(key, value);
+}
+
+// Name -> where the bytes live, shared by asset() and the 1.9 streaming pair.
+// `g_index`/-1 select the loader table; otherwise `table` points at a built-in entry.
+struct AssetWhere {
+    loader_game_t *g = nullptr;
+    int g_index = -1;
+    const tat_asset_t *table = nullptr;
+};
+static AssetWhere asset_find(const char *name)
+{
+    AssetWhere w;
+    if (!s.game || !name) return w;
+    if (loader_game_t *g = loader_resident()) {
+        const int n = loader_asset_count(g);
+        for (int i = 0; i < n; i++) {
+            const char *an = loader_asset_name(g, i);
+            if (an && std::strcmp(an, name) == 0) {
+                w.g = g;
+                w.g_index = i;
+                return w;
+            }
+        }
+        return w;
+    }
+    for (int i = 0; i < s.game->asset_count; i++) {
+        const tat_asset_t &a = s.game->assets[i];
+        // A package asset's name is a 16-byte field that need not end in NUL, so a plain
+        // strcmp could read past it into the asset's own bytes. Compare at most the
+        // field's width (mktat keeps names to 15 characters, so real names end sooner).
+        if (std::strncmp(a.name, name, 16) == 0) {
+            w.table = &a;
+            return w;
+        }
+    }
+    return w;
+}
+
+int api_asset_size(const char *name)
+{
+    const AssetWhere w = asset_find(name);
+    if (w.g) return int(loader_asset_size(w.g, w.g_index));
+    if (w.table) return int(w.table->end - w.table->data);
+    return 0;
+}
+
+int api_asset_read(const char *name, int offset, void *dst, int n)
+{
+    if (!dst || offset < 0 || n < 0) return -1;
+    const AssetWhere w = asset_find(name);
+    if (w.g) return loader_asset_read(w.g, w.g_index, size_t(offset), dst, size_t(n));
+    if (w.table) {
+        const size_t len = size_t(w.table->end - w.table->data);
+        if (size_t(offset) >= len) return 0;
+        if (size_t(offset + n) > len) n = int(len - size_t(offset));
+        memcpy(dst, w.table->data + offset, size_t(n));
+        return n;
+    }
+    return -1;
+}
+
+const void *api_asset(const char *name, size_t *len)
+{
+    if (!s.game) return nullptr;
+    // A packaged game's files live in its .tat: the loader streams them out on first
+    // ask and the pointer is stable for the game's life (loader_asset_data). Built-in
+    // games carry their files in the descriptor's own table, in the firmware.
+    if (loader_game_t *g = loader_resident()) {
+        const int n = loader_asset_count(g);
+        for (int i = 0; i < n; i++) {
+            const char *an = loader_asset_name(g, i);
+            if (an && std::strcmp(an, name) == 0) return loader_asset_data(g, i, len);
+        }
+        // The game reports this as its bundle being absent; say what the table held so a
+        // name mismatch and a starved allocation are distinguishable from the log alone.
+        ESP_LOGE(TAG, "asset '%s' not in the package (table holds %d)", name, n);
+        if (len) *len = 0;
+        return nullptr;
+    }
+    for (int i = 0; i < s.game->asset_count; i++) {
+        const tat_asset_t &a = s.game->assets[i];
+        // A package asset's name is a 16-byte field that need not end in NUL, so a plain
+        // strcmp could read past it into the asset's own bytes. Compare at most the
+        // field's width (mktat keeps names to 15 characters, so real names end sooner).
+        if (std::strncmp(a.name, name, 16) == 0) {
+            if (len) *len = size_t(a.end - a.data);
+            return a.data;
+        }
+    }
+    if (len) *len = 0;
+    return nullptr;
+}
+
+// Built on first use rather than at boot: it is the better part of a megabyte, and a
+// console whose games never ask for it should not be carrying it.
+bool polar_ready()
+{
+    static bool tried = false, ok = false;
+    if (!tried) {
+        tried = true;
+        ok = wc::Polar::init();
+        if (!ok) ESP_LOGE(TAG, "no memory for the polar tables");
+    }
+    return ok;
+}
+
+const uint16_t *api_polar_angles() { return polar_ready() ? wc::Polar::angles() : nullptr; }
+const uint16_t *api_polar_radii() { return polar_ready() ? wc::Polar::radii() : nullptr; }
+
+int api_text_width(const char *s, int scale, bool bold) { return wc::Gfx::textWidth(s, scale, bold); }
+
+void api_canvas_set_palette(tat_canvas_t *c, const tat_color_t *pal, int n)
+{
+    wc::Canvas *k = cv(c);
+    if (k) k->setPalette(pal, n);
+}
+
+const uint8_t *api_sheet_pixels(tat_sheet_t *x) { wc::Sheet *sp = sh(x); return sp ? sp->px : nullptr; }
+
+void api_sheet_info(tat_sheet_t *x, int *w, int *h, int *fw, int *fh)
+{
+    const wc::Sheet *sp = sh(x);
+    if (!sp) return;
+    if (w) *w = sp->w;
+    if (h) *h = sp->h;
+    if (fw) *fw = sp->fw;
+    if (fh) *fh = sp->fh;
+}
+
+void api_canvas_banner(tat_canvas_t *c, int cx, int y, int w, const tat_banner_t *b)
+{
+    wc::Canvas *k = cv(c);
+    if (!k) return;
+    console::ui::BannerStyle style{b->panel, b->border, b->mid_color, b->bottom_color};
+    style.top_scale = b->top_scale ? b->top_scale : 1;
+    style.bars = b->bars;
+    style.bottom_bold = b->bottom_bold;
+    console::ui::banner(*k, cx, y, w, b->top, b->mid, b->bottom, b->top_color, style);
+}
+
+tat_api_t s_api = {
+    TAT_API_MAJOR, TAT_API_MINOR,
+    api_rgb, api_log, api_now_us, api_random,
+    api_input, api_gestures,
+    api_alloc, api_free,
+    api_canvas_create, api_canvas_destroy, api_canvas_width, api_canvas_pixels,
+    api_canvas_color, api_canvas_reserve, api_canvas_set_color,
+    api_canvas_clear, api_canvas_pixel, api_canvas_fill_rect, api_canvas_rect,
+    api_canvas_line, api_canvas_fill_circle, api_canvas_text, api_canvas_text_centered,
+    api_sheet_load, api_canvas_sprite, api_canvas_sprite_scaled,
+    api_canvas_present, api_canvas_present_rotated,
+    api_menu_open, api_menu_close, api_menu_is_open, api_menu_invalidate,
+    api_menu_update, api_menu_draw, api_menu_sound_row, api_menu_toggle_sound, api_ui_color,
+    api_tone, api_volume,
+    api_save_get, api_save_set,
+    api_asset,
+    api_canvas_banner,
+    api_polar_angles, api_polar_radii,
+    api_text_width,
+    api_sheet_pixels, api_sheet_info,
+    api_canvas_set_palette,
+    api_tilt_sensitivity,
+    api_audio_start, api_audio_push, api_audio_space, api_audio_stop,
+    api_asset_size, api_asset_read,
+};
+
+// The input the game sees is a copy: it must not be able to reach into the engine's.
+void snapshot(wc::Engine &e)
+{
+    const wc::InputState &in = e.input();
+    s.gestures.update(in.touch);
+    s.input.held = in.held;
+    s.input.pressed = in.pressed;
+    s.input.released = in.released;
+    s.input.clicked = in.clicked;
+    s.input.long_press = in.long_press;
+    s.input.double_clicked = in.double_clicked;
+    s.input.touch = {uint8_t(in.touch.down), uint8_t(in.touch.pressed), uint8_t(in.touch.released), in.touch.x,
+                     in.touch.y};
+    s.input.tilt = {in.tilt.ax, in.tilt.ay, in.tilt.az, in.tilt.gx, in.tilt.gy, in.tilt.gz,
+                    in.tilt.rx, in.tilt.ry, in.tilt.rz, in.tilt.rdt};
+    s.ges = {uint8_t(s.gestures.tap), uint8_t(s.gestures.swipe_left), uint8_t(s.gestures.swipe_right),
+             s.gestures.x, s.gestures.y};
+}
+
+}  // namespace
+
+const tat_api_t *api() { return &s_api; }
+
+HostedGame::HostedGame(const tat_game_t &game)
+{
+    g_ = game;
+    // The save namespace stops being the game's to change here: the struct copy still
+    // carries the game's own pointer for id, so it is retargeted at a private copy.
+    // Everything else the game may keep - only the namespace decides where saves land.
+    snprintf(id_, sizeof(id_), "%.15s", g_.id ? g_.id : "");
+    g_.id = id_;
+}
+
+void HostedGame::unload()
+{
+    if (s.owner != this) return;
+    s.game = &g_;
+    if (g_.unload) g_.unload();
+    // A game is asked to tidy up, not trusted to. Anything still on the lists is a leak in
+    // the game, and it stops here rather than costing the next game its memory.
+    const size_t left = s.allocations.size() + s.canvases.size() + s.sheets.size();
+    if (left) ESP_LOGW(TAG, "%s left %u things behind; freed", g_.id ? g_.id : "?", unsigned(left));
+    for (wc::Sheet *sheet : s.sheets) {
+        sheet->release();
+        delete sheet;
+    }
+    for (wc::Canvas *c : s.canvases) delete c;
+    for (void *p : s.allocations) heap_caps_free(p);
+    s.sheets.clear();
+    s.canvases.clear();
+    s.allocations.clear();
+    s.menu.close();
+    s.owner = nullptr;
+    s.game = nullptr;
+}
+
+void HostedGame::begin(wc::Engine &e)
+{
+    s.engine = &e;
+    s.game = &g_;
+    s.owner = this;
+    if (g_.magic != TAT_GAME_MAGIC) {
+        ESP_LOGE(TAG, "%s is not a game", g_.id ? g_.id : "?");
+        return;
+    }
+    if (g_.api_major != TAT_API_MAJOR || g_.api_minor > TAT_API_MINOR) {
+        ESP_LOGE(TAG, "%s wants API %u.%u; this console has %u.%u", g_.id, g_.api_major, g_.api_minor,
+                 TAT_API_MAJOR, TAT_API_MINOR);
+        return;
+    }
+    ESP_LOGI(TAG, "%s: begin=%p enter=%p update=%p draw=%p", g_.id ? g_.id : "?", (void *)g_.begin,
+             (void *)g_.enter, (void *)g_.update, (void *)g_.draw);
+    if (g_.begin) g_.begin(&s_api);
+}
+
+void HostedGame::enter(wc::Engine &e)
+{
+    s.engine = &e;
+    s.game = &g_;
+    s.menu.close();
+    if (g_.enter) g_.enter();
+}
+
+void HostedGame::leave(wc::Engine &e)
+{
+    if (g_.leave) g_.leave();
+}
+
+void HostedGame::update(wc::Engine &e, float dt)
+{
+    s.engine = &e;
+    s.game = &g_;
+    snapshot(e);
+    if (g_.update) g_.update(dt);
+}
+
+void HostedGame::draw(wc::Engine &e, wc::Gfx &g)
+{
+    s.engine = &e;
+    if (g_.draw) g_.draw();
+}
+
+void HostedGame::redraw()
+{
+    s.menu.invalidate();
+    if (g_.redraw) g_.redraw();
+}
+
+bool HostedGame::keepAwake() const { return g_.keep_awake ? g_.keep_awake() : false; }
+
+// Nothing here needs a version guard: no game ships without these fields.
+size_t HostedGame::saveState(void *buf, size_t max) const
+{
+    if (!g_.state_save) return 0;
+    const int n = g_.state_save(buf, max);
+    return n > 0 ? size_t(n) : 0;
+}
+
+bool HostedGame::loadState(const void *buf, size_t len)
+{
+    if (!g_.state_load) return false;
+    return g_.state_load(buf, len);
+}
+
+void api_set_evict_hook(void (*fn)(void)) { s_evict = fn; }
+
+void api_release_for_game(void)
+{
+    if (s_evict) s_evict();
+}
+
+}  // namespace tat

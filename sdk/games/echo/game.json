@@ -1,0 +1,13 @@
+{
+  "id": "echo",
+  "name": "ECHO",
+  "author": "Gyro-Tron",
+  "version": 5,
+  "api_major": 1,
+  "api_minor": 4,
+  "accent": [
+    60,
+    220,
+    120
+  ]
+}

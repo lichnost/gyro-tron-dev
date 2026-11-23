@@ -1,0 +1,315 @@
+#include "console/launcher.h"
+
+#include "board/board.h"
+#include <cstdio>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+#include "audio/audio.h"
+#include "console/ui.h"
+#include "net/net.h"
+#include "storage/storage.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "nvs.h"
+
+namespace console {
+
+using wc::Color;
+using wc::Engine;
+using wc::Gfx;
+
+static const char *TAG = "launcher";
+
+void Launcher::releaseIcons()
+{
+    for (Image &img : builtin_icons_) img.release();
+    builtin_icons_.clear();
+}
+
+void Launcher::buildIcons()
+{
+    for (Image &img : builtin_icons_) img.release();
+    builtin_icons_.clear();
+    const int size = 2 * ICON_R;
+    for (int i = 0; i < n_; i++) {
+        Image img;
+        // A package's own icon first, then the firmware's for the apps that are part of
+        // it, and only then the one drawn in code - which for a package is the blank
+        // cartridge, and means its icon is missing or will not decode.
+        if (Theme::iconFromPng(apps_[i].icon_png, apps_[i].icon_len, apps_[i].id, img)
+            || (!apps_[i].packaged && Theme::builtinIcon(apps_[i].id, img))) {
+            builtin_icons_.push_back(img);
+            continue;
+        }
+        img.w = img.h = size;
+        img.px = static_cast<Color *>(heap_caps_malloc(size * size * sizeof(Color), MALLOC_CAP_SPIRAM));
+        img.alpha = static_cast<uint8_t *>(heap_caps_malloc(size * size, MALLOC_CAP_SPIRAM));
+        if (img.px && img.alpha) {
+            apps_[i].icon(img.px, ICON_R);
+            for (int p = 0; p < size * size; p++) img.alpha[p] = img.px[p] ? 255 : 0;
+        } else {
+            img.release();
+        }
+        builtin_icons_.push_back(img);
+    }
+}
+
+// A game was installed or removed over the link. Everything after the built-ins may have
+// moved, so the selection is carried across by id rather than by position - the ids are
+// copied first, because the strings they point at are about to be rewritten.
+void Launcher::rescan(Engine &e)
+{
+    storage_gen_ = storage_generation();
+    if (!rescan_) return;
+    char selected[32] = "";
+    if (!vis_.empty()) std::snprintf(selected, sizeof(selected), "%s", app(sel_).id);
+
+    const int n = rescan_();
+    if (n < 0) return;
+    n_ = n;
+    // The background before the icons, exactly as enter() does it: one large contiguous
+    // ask ahead of the twenty small ones, so the icons cannot fragment the PSRAM the
+    // background's decode then needs. A no-op when the theme is already in place.
+    Theme::get().reloadWithProgress(e);
+    buildIcons();
+    last_app_ = 0;
+    for (int i = 0; i < n_; i++)
+        if (std::strcmp(apps_[i].id, selected) == 0) last_app_ = i;
+    vis_.clear();
+    refreshVisible();
+    anim_ = 0;
+    full_ = true;
+    ESP_LOGI(TAG, "%d apps after a rescan", n_);
+}
+
+void Launcher::begin(Engine &e)
+{
+    buildIcons();
+    storage_gen_ = storage_generation();
+    // Start on the app you played last.
+    nvs_handle_t h;
+    if (nvs_open("console", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t v;
+        if (nvs_get_u8(h, "last_app", &v) == ESP_OK && v < n_) last_app_ = v;
+        nvs_close(h);
+    }
+    refreshVisible();
+    ESP_LOGI(TAG, "%d apps", n_);
+}
+
+// Rebuild the carousel from the apps that aren't hidden, keeping the same app selected.
+void Launcher::refreshVisible()
+{
+    const int current = vis_.empty() ? last_app_ : vis_[sel_];
+    vis_.clear();
+    for (int i = 0; i < n_; i++)
+        if (!appHidden(apps_[i].id)) vis_.push_back(i);
+    sel_ = 0;
+    for (int s = 0; s < count(); s++)
+        if (vis_[s] == current) sel_ = s;
+}
+
+void Launcher::enter(Engine &e)
+{
+    // Arriving home is when the console's one hard invariant kicks in: this screen
+    // must always be able to repaint. Anything discretionary that survived the trip -
+    // the remote debugger's frame caches, ~870 KB of PSRAM that nobody is looking at
+    // once a game is no longer on screen - goes back here, before anything is rebuilt.
+    // Without this, a watch that had been screenshot-debugged sat ~100 KB short of
+    // decoding its background forever: the caches pinned, the reload looping.
+    if (release_caches_) release_caches_();
+    if (storage_generation() != storage_gen_) rescan(e);
+    if (builtin_icons_.empty()) {
+        // The icons went to a launching game, whose load had also taken the theme. A
+        // package stays resident after going home so that coming back finds the game as
+        // it was left - but its memory does not come back with it, and a big one (a heap
+        // of its own plus a mapped package) leaves home unable to repaint: a black screen
+        // with one line of text - no theme, no icons, only the selected app's name. So
+        // before rebuilding, check that home fits next to
+        // what the game still holds - icons at ~130 KB a pop, the theme's art on top -
+        // and when it does not, the game lets go. It reloads from the package on the
+        // next tap; what is lost is only a run in progress, and only for a game too big
+        // to sit beside home in the first place.
+        const size_t icon_cost = size_t(2 * ICON_R) * (2 * ICON_R) * (sizeof(Color) + 1);
+        const size_t needed = size_t(n_) * icon_cost + 1536 * 1024;   // + theme art and decode room
+        if (evict_game_ && heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < needed) evict_game_();
+        // The background before the icons, and not only because the carousel draws on
+        // top of it: the background is one large contiguous ask (its decode scratch
+        // plus the pixels), the icons are twenty small ones. Allocating the small ones
+        // first used to fragment PSRAM around whatever the last game left, and the big
+        // ask then failed with the memory demonstrably there - free said 1650 KB, no
+        // contiguous block said 650. Largest first is how you keep that from happening.
+        // reloadWithProgress is a no-op when the theme is already in place.
+        Theme::get().reloadWithProgress(e);
+        buildIcons();
+    }
+    refreshVisible();
+    full_ = true;
+    anim_ = 0;
+}
+
+const Image &Launcher::iconFor(int app) const
+{
+    // A theme dresses any app whose id it names. Matching on the title as well is kept
+    // for the apps that are part of the firmware: a title is whatever a package says it
+    // is, and "BREAKOUT" from a stranger should not pick up the theme's Breakout icon. An
+    // id cannot be borrowed that way - the watch only ever holds one game per id.
+    const char *title = apps_[app].packaged ? "" : apps_[app].name;
+    if (const Image *themed = Theme::get().icon(apps_[app].id, title)) return *themed;
+    if (app < int(builtin_icons_.size())) return builtin_icons_[app];
+    static Image none;   // released for a game; drawImage skips a blank one
+    return none;
+}
+
+void Launcher::move(int dir)
+{
+    sel_ = (sel_ + dir + count()) % count();
+    anim_ += dir * SPACING;   // new selection slides in from the side we swiped from
+    full_ = true;
+}
+
+void Launcher::update(Engine &e, float dt)
+{
+    const auto &in = e.input();
+    ges_.update(in.touch);
+
+    if (storage_generation() != storage_gen_) rescan(e);
+    // New files may have arrived over the USB link: reload, showing progress.
+    Theme::get().reloadWithProgress(e);
+    if (Theme::get().generation() != theme_gen_) {
+        theme_gen_ = Theme::get().generation();
+        full_ = true;
+    }
+
+    if (ges_.swipe_left) move(+1);
+    if (ges_.swipe_right) move(-1);
+    // PWR on the home screen does one thing: double-click puts the watch to sleep.
+    if (in.double_clicked & wc::BTN_B) {
+        wc::audio::play({.f0 = 700, .f1 = 180, .ms = 260, .wave = wc::audio::Wave::Triangle, .volume = 0.6f});
+        e.sleep();
+        return;
+    }
+
+    battery_t_ += dt;
+    if (battery_t_ > 5.0f) {
+        battery_t_ = 0;
+        const int pct = pmu_battery_percent();
+        const bool chg = pmu_charging() || pmu_usb_power();
+        if (pct != battery_pct_ || chg != battery_charging_) {
+            battery_pct_ = pct;
+            battery_charging_ = chg;
+            hint_dirty_ = true;   // the second hint line is the battery readout
+        }
+    }
+
+    hint_t_ += dt;
+    if (hint_t_ > 3.0f) {
+        hint_t_ = 0;
+        // A third line joins the rotation while the site is offering an update that has
+        // not gone in yet: it should be findable without anyone going to look for it.
+        hint_ = (hint_ + 1) % (ota_pull_pending(nullptr, 0) ? 3 : 2);
+        hint_dirty_ = true;
+    }
+
+    const int icon_cx = Gfx::CX + int(anim_);
+    const int dx = ges_.x - icon_cx, dy = ges_.y - ICON_CY;
+    const bool tapped_icon = ges_.tap && dx * dx + dy * dy < (ICON_R + 30) * (ICON_R + 30);
+    if (ges_.tap && !tapped_icon) {
+        if (ges_.x < Gfx::CX - ICON_R) move(-1);
+        else if (ges_.x > Gfx::CX + ICON_R) move(+1);
+    }
+    if (tapped_icon && std::fabs(anim_) < 40 && app(sel_).game) {
+        nvs_handle_t h;
+        if (nvs_open("console", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h, "last_app", uint8_t(vis_[sel_]));
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        e.switchTo(*app(sel_).game);
+        return;
+    }
+
+    // Snappy ease toward the selected app.
+    anim_ *= std::exp(-dt * 14.0f);
+    if (std::fabs(anim_) < 0.5f) anim_ = 0;
+
+}
+
+void Launcher::drawIcons(Gfx &g, int shift)
+{
+    const int band_y = ICON_CY - ICON_R - 12, band_h = 2 * ICON_R + 24;
+    ui::restoreBg(g, 0, band_y, Gfx::W, band_h);
+    for (int k = -1; k <= 1; k++) {
+        if (k != 0 && count() < 2) continue;   // a lone app has no neighbours
+        const int i = vis_[(sel_ + k + count()) % count()];
+        const Image &icon = iconFor(i);
+        if (!icon.valid()) continue;
+        const int cx = Gfx::CX + shift + k * SPACING;
+        const int cy = ICON_CY;
+        if (cx + icon.w / 2 < 0 || cx - icon.w / 2 >= Gfx::W) continue;
+        drawImage(g, icon, cx - icon.w / 2, cy - icon.h / 2);
+    }
+}
+
+void Launcher::draw(Engine &e, Gfx &g)
+{
+    const int shift = int(std::lround(anim_));
+
+    if (full_) {
+        ui::clearScreen(g);   // the theme's background carries any branding
+        ui::shadowText(g, Gfx::CX, Gfx::CY + 112, app(sel_).name, app(sel_).accent, 4);
+        // "3/11" rather than a row of dots. Dots were fine for eight built-in games and
+        // stop being fine the moment somebody installs a few: at twenty they are wider than
+        // the screen, and past about a dozen nobody is counting them anyway. Text costs the
+        // same few characters whether there are four games or four hundred.
+        //
+        // And "12/13" rather than "12 OF 13": themes paint a plate behind this spot, sized
+        // for the dots it replaced - about 90 px. Two digits either side of " OF " is 104
+        // and hung off the end of it; with a slash it is 65, and fits up to 99/99.
+        char pos[32];
+        std::snprintf(pos, sizeof(pos), "%d/%d", sel_ + 1, count());
+        ui::shadowText(g, Gfx::CX, Gfx::CY + 152, pos, ui::DIM, 2);
+        full_ = false;
+        hint_dirty_ = true;
+        drawn_shift_ = 1 << 30;
+    }
+    if (hint_dirty_) {
+        // One slot, two alternating lines: what to do, and the battery. The battery used
+        // to be a little cell under this spot, but themes paint their own art down there -
+        // bright plates that swallowed the white cell whole - so as text it shares the
+        // hint's style and place instead, where every theme already keeps text readable.
+        // Color carries the state at a glance: green while charging, red when low, yellow
+        // in between, and the hint's own dim gray when there is plenty left.
+        char line[28];
+        Color c = ui::DIM;
+        char ver[20];
+        if (hint_ == 2 && ota_pull_pending(ver, sizeof(ver))) {
+            snprintf(line, sizeof(line), "UPDATE %s", ver);
+            c = ui::GO;
+        } else if (hint_ == 0)
+            snprintf(line, sizeof(line), "TAP TO PLAY");
+        else if (battery_pct_ >= 0) {
+            // Both branches take exactly one int; flawfinder cannot see through the ternary.
+            // flawfinder: ignore
+            snprintf(line, sizeof(line), battery_charging_ ? "CHARGING %d%%" : "BATTERY %d%%", battery_pct_);
+            c = battery_charging_ ? ui::GO : battery_pct_ <= 15 ? ui::DANGER
+                : battery_pct_ <= 40  ? ui::ACCENT
+                                      : ui::DIM;
+        } else
+            snprintf(line, sizeof(line), "PWR X2: SLEEP");
+        ui::restoreBg(g, Gfx::CX - 110, Gfx::CY + 175, 220, 22);
+        ui::shadowText(g, Gfx::CX, Gfx::CY + 185, line, c, 2);
+        hint_dirty_ = false;
+    }
+    // The home screen is still unless the carousel is sliding: nothing to redraw,
+    // nothing sent to the panel, and the engine idles between frames.
+    if (shift != drawn_shift_) {
+        drawIcons(g, shift);
+        drawn_shift_ = shift;
+    }
+}
+
+}  // namespace console

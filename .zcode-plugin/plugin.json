@@ -1,0 +1,13 @@
+{
+  "name": "gyro-tron-dev",
+  "version": "0.13.0",
+  "description": "End-to-end Gyro-Tron game development: design, write C against tat_api.h, compile, screenshot-test in the emulator, build and validate .tat packages and install them to a watch.",
+  "author": { "name": "Pavel Semenov" },
+  "skills": "./skills",
+  "mcpServers": {
+    "gyro-tron-dev": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+name: selftest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pillow numpy pyserial
+      - name: Self-test (golden compare, export list, doc drift, MCP over stdio)
+        run: python mcp/selftest.py
+      - name: Compile the reference game and screenshot it
+        run: python sdk/tools/emu/emu.py shot echo "wait 1; tap 233 233; wait 1; shot ci.png"

@@ -1,7 +1,7 @@
 """Self-test for the device tooling in server.py - run it after touching
 server.py or tatref.py:
 
-    python plugins/gyro-tron-dev/mcp/selftest.py
+    python mcp/selftest.py            (plugins/gyro-tron-dev/mcp/ in the firmware repo)
 
 Layers:
 
@@ -15,7 +15,7 @@ Layers:
    does: initialize, the exact tool list, and create_game (the placeholder
    icon within its 4096-byte budget).
 
-Artifacts land in build/selftest/ and a scratch game games/selftest_tmp is
+Artifacts land in build/selftest/ under the root and a scratch game games/selftest_tmp is
 removed again; the run leaves nothing behind on success or failure (finally
 blocks).
 """

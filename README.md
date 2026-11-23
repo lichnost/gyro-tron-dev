@@ -13,22 +13,41 @@ discovery works unchanged inside it.
 
 ## Install
 
-As a ZCode plugin, straight from this repository:
+Clone this repository. The server needs nothing but the clone:
 
+```bash
+git clone https://github.com/lichnost/gyro-tron-dev.git
 ```
-zcode plugin add https://github.com/lichnost/gyro-tron-dev
+
+Add the MCP server to your agent's configuration — command `python`, argument the
+path to `mcp/server.py` inside the clone:
+
+```json
+{
+  "mcpServers": {
+    "gyro-tron-dev": { "command": "python", "args": ["<clone>/mcp/server.py"] }
+  }
+}
 ```
 
-(or add it through your marketplace/config of choice — the manifest is
-`.zcode-plugin/plugin.json`.)
+The server finds `sdk/` on its own, wherever the agent's working directory is: a root
+is looked for by walking up from the working directory (marker: `tools/mktat.py` plus
+`components/tat_api/include/tat/tat_api.h`), and when none is found the clone's own
+`sdk/` is used. To force a particular root, set `GYROTRON_ROOT`.
 
-Then open a workspace that is — or contains — this clone, and try:
+The skills in `skills/` are plain `SKILL.md` files with no host-specific parts; give
+them to the agent the way it takes skills. The repository also carries a ZCode plugin
+manifest (`.zcode-plugin/plugin.json`) that declares the same server and the skills.
+
+## Trial
+
+In any workspace, ask:
 
 > Make me a simple Gyro-Tron game where you tilt a ball into a hole. Use the
 > gyro-tron skills.
 
-Expected: a new `games/<id>/`, compiling code, screenshots the agent has looked at, a
-built `build/<id>.tat` that passes `validate_package`.
+Expected: a new `sdk/games/<id>/`, compiling code, screenshots the agent has looked at,
+a built `sdk/build/<id>.tat` that passes `validate_package`.
 
 ## Layout
 
@@ -36,9 +55,15 @@ built `build/<id>.tat` that passes `validate_package`.
 |---|---|
 | `sdk/` | The exported toolchain snapshot (machine-written; see CONTRIBUTING) |
 | `sdk/games/` | The reference game `echo` and every game an agent creates here |
+| `sdk/build/` | Emulator runs, screenshots and packed `.tat` files (gitignored) |
 | `sdk/docs/reference/GAME_API.md` | The game API — served to the agent as `tat://api/docs` |
 | `mcp/` | The MCP server, its resources and the self-test |
 | `skills/` | `gyrotron-core`, `gyrotron-build-test`, `gyrotron-ship`, `gyrotron-hw` |
+
+Every path a tool takes or returns is relative to the root, and the root is `sdk/`:
+`create_game` writes `games/<id>/`, `build_package` writes `build/<id>.tat`. A relative
+`path` given to `validate_package` or `install_to_watch` is resolved against the same
+root, not against the agent's working directory.
 
 ## What the agent gets
 
@@ -62,25 +87,35 @@ no image-generation tools ship with this plugin.
   elsewhere).
 - The xtensa toolchain (`~/.espressif` or `C:\Espressif\tools\xtensa-esp-elf`) only
   for `.tat` packaging; everything else works without it.
-- Installing to a watch needs `gyrotron-manager` on PATH, a `dotnet publish` of
-  `sdk/app/GyroTron.Manager`, or `dotnet`, plus the watch over USB.
+- Installing to a watch needs the watch over USB and one of: `dotnet` (the manager
+  app in `sdk/app/GyroTron.Manager` is run from source), `gyrotron-manager` on PATH,
+  or a `publish/` build of it in `sdk/app/GyroTron.Manager`.
+
+The manager app is a GUI binary and prints nothing on its command line, so an install
+done through `dotnet run` reports only success or failure. What actually reached the
+watch is in its log: `get_log` shows `link: stored /data/Games/<id>.tat` for a package
+the console accepted.
 
 ## Working against the full firmware clone
 
-If you develop inside a Gyro-Tron firmware checkout, the plugin uses the firmware tree
-instead of `sdk/`: the repo root is found by walking up from the working directory
-(marker: `tools/mktat.py` + `components/tat_api`), or set `GYROTRON_ROOT` in the MCP
-server config to the clone's path. `sdk/` then simply goes unused.
+Inside a Gyro-Tron firmware checkout the plugin uses the firmware tree instead of
+`sdk/`: the walk up from the working directory finds that root first, and `sdk/` goes
+unused. With both trees at hand, `GYROTRON_ROOT` picks the one to work on.
 
 ## When a game hangs at the boot splash
 
-A black screenshot with a healthy log line means the game task never started: the game
-died between `tat_main` entry and its first loop iteration — most often a per-frame
-allocation exhausted before the first draw, a stack overflow in the game task, or a
-blocking call in the init path. Reproduce on the PC first (`compile_game` +
-`screenshot` with the same game), then read the watch's raw UART via
-`watch_control {serial: "", seconds: 30}` for the panic text, and resolve addresses
-with `sdk/tools/emu/sym.py` against the firmware's map.
+A black screenshot while the watch still answers — the log, the status, injected
+input all work — means the game task never started, not that the game is slow. The
+game task needs a contiguous block of internal RAM for its stack, the same pool Wi-Fi,
+the HTTP server and the USB driver allocate from; a boot whose allocations left no such
+block has nothing that draws, and the screen stays at the splash's last frame. Which
+boot hits it depends on that boot's allocations, so it comes and goes.
+
+The firmware checks the task creation, retries, and on final failure logs the largest
+free internal block and restarts; a console that fails several boots in a row comes up
+in safe mode. So when this is seen, read the log with `get_log` first — it tells a
+refused package, a failed task creation and a counted bad boot apart — and
+`watch_control {reboot: true}` starts a clean boot.
 
 ## How `sdk/` is updated
 

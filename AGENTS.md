@@ -13,10 +13,11 @@ emulator, the packer, the debug client, the reference game `echo` and the docs).
   `sdk/` looks wrong, say so in the report instead of patching it.
 - `mcp/` and `skills/` are the editable code. The self-test is the acceptance gate:
   `python mcp/selftest.py` after any change there.
-- Everything disposable goes under `build/` (gitignored): emulator runs, screenshots,
-  packed `.tat` files, a scratch game being debugged, throwaway scripts in their own
-  `build/<name>/` directory. Games created by agents live in `sdk/games/<id>/` — that
-  tree is writable by design.
+- Everything disposable goes under `sdk/build/` (gitignored): emulator runs,
+  screenshots, packed `.tat` files, a scratch game being debugged, throwaway scripts in
+  their own `sdk/build/<name>/` directory. Games created by agents live in
+  `sdk/games/<id>/` — that tree is writable by design. The root is `sdk/`, so the
+  `games/<id>` and `build/<id>.tat` paths the tools take and return are inside it.
 
 ## What you can run here
 
@@ -26,9 +27,15 @@ emulator, the packer, the debug client, the reference game `echo` and the docs).
   `python sdk/tools/emu/emu.py play <game>`, `shot <game> "<script>"`, `sheet` —
   see `sdk/tools/emu/README.md`. Console screens work too (`@boot`, `@power`,
   `@hold`, `@home`).
-- `python sdk/tools/mktat.py sdk/games/<id>` packs `build/<id>.tat` (xtensa toolchain
-  needed); `validate_package` checks a package without one.
+- `python sdk/tools/mktat.py sdk/games/<id>` packs `sdk/build/<id>.tat` (xtensa
+  toolchain needed); `validate_package` checks a package without one.
 - `python sdk/tools/hw_debug.py --port COM4 ...` drives a real watch; needs pyserial.
+- `install_to_watch` runs the manager app from source through `dotnet run`. The app is
+  a GUI binary and prints nothing, so the tool reports only success or failure: confirm
+  the install in `get_log` (`link: stored /data/Games/<id>.tat`), never by the empty
+  output alone.
+- There is no hosted CI here: run the self-test yourself before reporting a change to
+  `mcp/` or `skills/` as done.
 
 MSVC on a Russian-locale Windows emits non-UTF-8 diagnostics — decode compiler output
 with `errors='replace'` in any new tooling that captures it (the emulator already

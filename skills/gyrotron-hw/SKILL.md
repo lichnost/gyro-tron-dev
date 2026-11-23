@@ -16,10 +16,14 @@ exactly one driver, and no step of this loop needs Python or PowerShell detours.
 
 ## The chain
 
-1. `install_to_watch(<path>)` - validate + install via the manager. Use
-   `watch_control {game: "<id>"}` right after: the launch re-resolves the carousel by
-   id at that moment (never trust an app number remembered from earlier - reinstalls
-   reorder it).
+1. `install_to_watch(<path>)` - validate + install via the manager. Run through
+   `dotnet run` the manager prints nothing, so the tool answers only success or
+   failure: `get_log` shows `link: stored /data/Games/<id>.tat` once the watch has the
+   package. Then use `watch_control {game: "<id>"}` right after: the launch
+   re-resolves the carousel by id at that moment (never trust an app number remembered
+   from earlier - reinstalls reorder it). A freshly launched game is not ready for
+   input at once - sync on its log line with `waitlog "<id>: ready"` before the first
+   `tap`.
 2. `watch_control {script: "..."}` - the same script words as the emulator
    (`tap/hold/swipe/btn/tilt`, `wait`, `waitpx`, `shot`), plus two client-side words:
    `app <id>` and `waitlog "<regex>" [s]` (sync on a boot stage or a game log line
@@ -41,8 +45,9 @@ means this build predates the word - say so, do not retry.
   ESP-IDF panic text and backtraces included. A panic resets the chip and drops the
   USB port; the tool reopens it and keeps listening. Resolve addresses with
   `tools/emu/sym.py` against the firmware's map.
-- A black screenshot with a healthy log means the game task never started - see the README section
-  `When a game hangs at the boot splash`.
+- A black screenshot while the watch still answers means the game task never
+  started: `get_log` tells a refused package from a failed task creation. Details in
+  the README section `When a game hangs at the boot splash`.
 - The heap shim's bugs show only on the watch: build the game in the emulator with
   `EMU_HEAP_MB` set (see **gyrotron-build-test**) to reproduce memory pressure on the PC.
 

@@ -6,7 +6,9 @@ the manager/tatlink for installing to a watch. Standard library only; Pillow is 
 just for the placeholder icon that create_game generates.
 
 The repo root is found by walking up from the working directory (marker: tools/mktat.py
-plus components/tat_api), or set GYROTRON_ROOT to point at the clone directly.
+plus components/tat_api), or set GYROTRON_ROOT to point at the clone directly. When no
+root is above, this plugin's own sdk/ is the root: the standalone install carries the
+whole toolchain with it. All paths the tools take and return are relative to the root.
 """
 
 import json

@@ -516,6 +516,10 @@ def tool_screenshot(a):
 
 def tool_validate_package(a):
     path = a["path"]
+    # A relative path means "under the root" (build/<id>.tat is where mktat writes),
+    # not under the agent's cwd - which need not be the root at all.
+    if not os.path.isabs(path):
+        path = os.path.join(ROOT, path)
     try:
         data = open(path, "rb").read()
     except OSError as e:

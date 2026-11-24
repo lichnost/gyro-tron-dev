@@ -133,7 +133,28 @@ static class Program
                     var p = TatPackage.Read(args[1]);
                     Console.WriteLine($"{p.Name} ({p.Id}) v{p.Version} by {p.Author} - "
                                       + $"{p.Bytes / 1024} KB, game API {p.ApiMajor}.{p.ApiMinor}, "
-                                      + $"{(p.IsGame ? "GAME" : $"kind {p.Kind}")}");
+                                      + $"{(p.IsGame ? "GAME" : $"kind {p.Kind}")}, "
+                                      + (p.Signature == SignatureState.Valid
+                                         ? $"signature verified (key {p.SignatureKeyId})"
+                                         : "no signature"));
+                    return 0;
+                }
+                case "catalog" when args.Length <= 2:
+                {
+                    // What the pane would show, from a script - and the way tests point the
+                    // app at a local catalog file instead of the host.
+                    var svc = new CatalogService(args.Length == 2 ? args[1] : null);
+                    var r = svc.Load(refresh: false);
+                    if (r.Error is not null)
+                    {
+                        Console.Error.WriteLine($"error: {r.Error}");
+                        return 1;
+                    }
+                    Console.WriteLine($"catalog: {svc.IndexUrl}{(r.FromCache ? " (cached)" : "")}, "
+                                      + $"generated {r.Generated}, {r.Games.Count} games");
+                    foreach (var g in r.Games.OrderByDescending(g => g.Channel).ThenBy(g => g.Name))
+                        Console.WriteLine($"  {g.Name,-14} {g.Id,-14} {g.Channel,-9} v{g.Version,-4} "
+                                          + $"{g.Size / 1024,4} KB  api {g.ApiMajor}.{g.ApiMinor}  {g.Summary}");
                     return 0;
                 }
                 case "bench":
@@ -167,6 +188,7 @@ static class Program
                           gyrotron-manager send <folder> <remote> copy a folder to it
                           gyrotron-manager remove <remote>        delete a file or folder
                           gyrotron-manager verify <file.tat>      check a package, no watch needed
+                          gyrotron-manager catalog [url-or-file]  list the game catalog
                           gyrotron-manager log                    the tail of the watch's log
                         """);
                     return 1;

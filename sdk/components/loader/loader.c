@@ -25,6 +25,13 @@ static const char *TAG = "loader";
 #define SEC_CODE 0x45444F43u   /* 'CODE' little-endian */
 #define SEC_ICON 0x4E4F4349u
 #define SEC_ASSET 0x54535341u  /* 'ASST' */
+#define SEC_SIG 0x20474953u    /* 'SIG ' - skipped at load like any unknown section; its
+                                * table entry carries crc 0 by format rule (the signature
+                                * is the section's integrity check - a CRC over the
+                                * signature bytes would be circular), so every CRC pass
+                                * below must skip it too. Verification runs at install
+                                * time only (loader_verify_signature, sig.c). */
+
 /* Any other section type is skipped: only these three are read, and the header CRC still
  * covers the rest of the file, so an old package carrying a section nothing reads loads. */
 
@@ -97,6 +104,7 @@ static bool check_package(const uint8_t *buf, size_t len, const tat_header_t **h
     const tat_section_t *secs;
     if (!check_head(buf, len, len, &h, &secs)) return false;
     for (int i = 0; i < h->section_count; i++) {
+        if (secs[i].type == SEC_SIG) continue;   /* crc 0 by format rule, see above */
         if (esp_rom_crc32_le(0, buf + secs[i].offset, secs[i].size) != secs[i].crc32) {
             ESP_LOGE(TAG, "section %d (%.4s) is corrupt", i, (const char *)&secs[i].type);
             return false;
@@ -398,6 +406,7 @@ static int sf_verify(stream_t *s)
     const int nsecs = s->h->section_count;
     for (int i = 0; rc == 0 && i < nsecs; i++) {
         const tat_section_t *sec = &s->secs[i];
+        if (sec->type == SEC_SIG) continue;   /* crc 0 by format rule, see the section notes */
         uint32_t crc = 0;
         size_t off = sec->offset, left = sec->size;
         while (left > 0) {

@@ -35,6 +35,10 @@ public partial class MainWindow : Window
     static readonly IBrush Good = new SolidColorBrush(Color.Parse("#28C86E"));
 
     readonly Library _library = new();
+    readonly CatalogService _catalog = new();
+    readonly Dictionary<string, byte[]> _catalogIcons = new();   // icon url -> PNG, one fetch per session
+    CatalogResult? _catalogResult;
+    bool _showingCatalog;
     Watch? _watch;
     bool _busy;
     (Kind Kind, string Key)? _pick;             // Key: a game id, a library file path, a theme name
@@ -55,6 +59,9 @@ public partial class MainWindow : Window
         RemoveButton.Click += (_, _) => _ = RemoveAsync();
         OpenFolderButton.Click += (_, _) => OpenLibraryFolder();
         LibraryPath.Text = _library.Folder;
+        LibraryTabButton.Click += (_, _) => ShowPane(library: true);
+        CatalogTabButton.Click += async (_, _) => await ShowPaneAsync(library: false);
+        CatalogRefreshButton.Click += async (_, _) => await ShowPaneAsync(library: false, refresh: true);
 
         AcceptDrops(WatchPane, LibraryGameFormat, DropOnWatchAsync);
         AcceptDrops(LibraryPane, WatchGameFormat, DropOnLibraryAsync);
@@ -183,6 +190,183 @@ public partial class MainWindow : Window
             LibraryPanel.Children.Add(grid);
         }
         UpdateButtons();
+    }
+
+    // ------------------------------------------------------------------ the catalog pane
+
+    /// <summary>The right pane is the library or the catalog; the same screen estate,
+    /// two sources. The catalog is read-only browsing plus two buttons per game - it
+    /// downloads into the library and installs through the library, never around it.</summary>
+    void ShowPane(bool library)
+    {
+        _showingCatalog = !library;
+        LibraryTabButton.FontWeight = library ? FontWeight.Bold : FontWeight.Normal;
+        CatalogTabButton.FontWeight = library ? FontWeight.Normal : FontWeight.Bold;
+        LibraryHead.IsVisible = library;
+        CatalogHead.IsVisible = !library;
+        LibraryPanel.IsVisible = library;
+        CatalogPanel.IsVisible = !library;
+        OpenFolderButton.IsVisible = library;
+    }
+
+    async Task ShowPaneAsync(bool library, bool refresh = false)
+    {
+        ShowPane(library);
+        if (library) return;
+        if (_catalogResult is null || refresh)
+        {
+            await RunAsync(refresh ? "refreshing the catalog" : "fetching the catalog", () =>
+                _catalogResult = _catalog.Load(refresh));
+            if (_catalogResult is null) return;
+        }
+        RenderCatalog();
+    }
+
+    void RenderCatalog()
+    {
+        if (_catalogResult is not { } result) return;
+        CatalogPanel.Children.Clear();
+
+        if (result.Error is not null)
+        {
+            CatalogPanel.Children.Add(Note($"{result.Error}\n\nCheck the connection and press Refresh."));
+            CatalogStatus.Text = "";
+            return;
+        }
+        CatalogStatus.Text = result.FromCache
+            ? $"cached list, generated {result.Generated} - offline"
+            : $"generated {result.Generated}";
+
+        var owned = _library.Games().Select(g => g.Package.Id).ToHashSet();
+        var (apiMajor, apiMinor) = (_watch?.GameApi.Major ?? 0, _watch?.GameApi.Minor ?? 0);
+        var haveWatch = _watch is not null;
+        var grid = new WrapPanel { Orientation = Orientation.Horizontal };
+        foreach (var e in result.Games.OrderByDescending(g => g.Channel).ThenBy(g => g.Name))
+        {
+            var runnable = !haveWatch || e.RunsOn(apiMajor, apiMinor);
+            var onWatch = haveWatch && _watchGames.Any(g => g.Id == e.Id);
+            grid.Children.Add(CatalogTile(e, owned.Contains(e.Id), onWatch, runnable));
+        }
+        CatalogPanel.Children.Add(grid);
+        if (result.Games.Count == 0)
+            CatalogPanel.Children.Add(Note("The catalog is empty. That happens while it is being set up."));
+    }
+
+    /// <summary>One catalog game: picture, name, one line of facts, and what you can do
+    /// about it. The channel travels with the entry from the index; a signature verifies
+    /// it again when the bytes arrive, because the index itself is only a file on a host.</summary>
+    Border CatalogTile(CatalogEntry e, bool inLibrary, bool onWatch, bool runnable)
+    {
+        var stack = new StackPanel { Width = 96, Spacing = 3, Opacity = runnable ? 1.0 : 0.45 };
+        var picture = new Border
+        {                       // stands in until the icon arrives (or forever, offline)
+            Width = 56, Height = 56, CornerRadius = new CornerRadius(28),
+            Background = new SolidColorBrush(Color.Parse("#22252F")),
+            Child = new TextBlock
+            {
+                Text = e.Name.Length > 0 ? e.Name[..1] : "?",
+                FontSize = 24, FontWeight = FontWeight.Bold, Foreground = Dim,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+        _ = LoadCatalogIconAsync(e, png =>
+        {
+            try { picture.Child = new Image { Source = new Bitmap(new MemoryStream(png)), Width = 56, Height = 56 }; }
+            catch { /* an undecodable icon keeps the initial */ }
+        });
+        stack.Children.Add(picture);
+        stack.Children.Add(new TextBlock
+        {
+            Text = e.Name, FontSize = 11, TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#EAF0FF")),
+        });
+        var (tag, tagBrush) = onWatch ? ("on the watch", Good)
+            : inLibrary ? ("in your library", Dim)
+            : runnable ? ($"v{e.Version} · {e.Size / 1024} KB", Dim)
+            : ($"needs game API {e.ApiMajor}.{e.ApiMinor}", Warn);
+        stack.Children.Add(new TextBlock
+        {
+            Text = e.Channel == "official" ? "★ official" : "community",
+            FontSize = 9, TextAlignment = TextAlignment.Center, Foreground = e.Channel == "official"
+                ? new SolidColorBrush(Color.Parse("#7FE8FF")) : Dim,
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = tag, FontSize = 10, TextAlignment = TextAlignment.Center, Foreground = tagBrush,
+        });
+
+        var get = new Button { Content = "Get", FontSize = 10, Padding = new Thickness(8, 2), Margin = new Thickness(0, 4, 4, 0) };
+        get.Click += (_, _) => _ = GetFromCatalogAsync(e);
+        var install = new Button
+        {
+            Content = "Install", FontSize = 10, Padding = new Thickness(8, 2), Margin = new Thickness(0, 4, 0, 0),
+            IsEnabled = runnable && _watch is not null,
+        };
+        install.Click += (_, _) => _ = InstallFromCatalogAsync(e);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+        buttons.Children.Add(get);
+        buttons.Children.Add(install);
+        stack.Children.Add(buttons);
+
+        var card = new Border
+        {
+            Background = Clear, BorderBrush = Clear, BorderThickness = new Thickness(2),
+            CornerRadius = new CornerRadius(3), Padding = new Thickness(4), Margin = new Thickness(0, 0, 8, 8),
+            Child = stack,
+        };
+        ToolTip.SetTip(card, $"{e.Name} v{e.Version} by {e.Author}\n{e.Summary}"
+                            + (e.Source is null ? "" : $"\n{e.Source}"));
+        return card;
+    }
+
+    async Task LoadCatalogIconAsync(CatalogEntry e, Action<byte[]> set)
+    {
+        if (e.IconUrl.Length == 0) return;
+        byte[]? png = null;
+        if (!_catalogIcons.TryGetValue(e.IconUrl, out var cached))
+        {
+            png = await Task.Run(() =>
+            {
+                try { return _catalog.DownloadImage(e.IconUrl); }
+                catch { return null; }
+            });
+            if (png is null) return;
+            _catalogIcons[e.IconUrl] = png;
+        }
+        else png = cached;
+        Dispatcher.UIThread.Post(() => set(png));
+    }
+
+    /// <summary>Download into the library - the catalog's "Get". The sha256 check and
+    /// the package parse (signature included) happen inside Download/Add, so what lands
+    /// in the library is exactly what the index promised.</summary>
+    async Task GetFromCatalogAsync(CatalogEntry e)
+    {
+        if (await RunAsync($"downloading {e.Name}", () => _library.Add(_catalog.Download(e, (done, total) =>
+                Report($"{e.Name}  {done / 1024} KB", total == 0 ? 0 : done * 100.0 / total)))))
+        {
+            SetBusy($"{e.Name} is in your library");
+            RefreshLibrary();
+            RenderCatalog();
+        }
+    }
+
+    /// <summary>Download and put on the watch - the catalog's "Install". Same road as a
+    /// library install, so the same rules (API version, install path) apply.</summary>
+    async Task InstallFromCatalogAsync(CatalogEntry e)
+    {
+        if (_watch is not { } w) return;
+        var ok = await RunAsync($"installing {e.Name}", () =>
+        {
+            var game = _library.Add(_catalog.Download(e, (done, total) =>
+                Report($"{e.Name}  {done / 1024} of {total / 1024} KB", total == 0 ? 0 : done * 100.0 / total)));
+            Library.Install(w, game, (done, total) =>
+                Report($"{e.Name}  {done / 1024} of {total / 1024} KB", total == 0 ? 0 : done * 100.0 / total));
+        });
+        if (!ok) return;
+        await RefreshAsync();
+        SetBusy($"{e.Name} installed - it is on the watch's home screen now");
     }
 
     // ------------------------------------------------------------------ actions

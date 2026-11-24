@@ -94,9 +94,25 @@ that comes out is an ordinary `.tat` in every other respect. Descriptor format:
 | `CODE` | GAME | The executable image. Format decided by §6. |
 | `ICON` | GAME | PNG with alpha, the carousel icon. 210×210 is what it is drawn at; the loader decodes at most 232×232, and the limit is 4096 bytes. |
 | `ASST` | GAME | `name[16]` then bytes. Sprite sheets, backgrounds, ROM dumps (`games/gbboy/README.md`). |
+| `SIG ` | GAME | Optional, always last: 1 key-id byte + a 64-byte Ed25519 signature over everything before it. See below. |
 
 Any other section type is skipped by the loader (the header CRC still covers it), so a
 future section type can arrive without breaking an installed game.
+
+**The `SIG ` section.** Signed means the official channel of the game catalog: built and
+signed by the console developers (`tools/mktat.py --sign <keyfile>`, or the catalog
+pipeline signing on deploy - `docs/reference/CATALOG.md`). The signature covers the byte
+range from offset 0 to the start of the section itself, so it authenticates the header,
+the table and every other section; the table entry's own crc32 is 0 by format rule (a CRC
+over the signature bytes would be circular), and every CRC pass skips the section for
+that reason. Community packages ship unsigned on purpose - their risk is bounded by the
+loader sandbox, not by a signature, and an unsigned package loads exactly as it always
+has. Verification runs at install time - the manager checks before sending
+(`TatPackage.cs`), the watch's store checks what it downloads
+(`loader_verify_signature` in `components/loader/sig.c`) - and never at launch, so boot
+stays as fast as it is today. The trusted public keys sit in `components/loader/keys.c`,
+`tools/tatpkg.py` and `TatPackage.cs`; `tests/test_tat_format.py` fails if the three
+copies drift apart.
 
 **Where the checks run.** Sending a `.tat` is an ordinary `FS_PUT` (§7): the link writes
 the file without looking inside it. The package checks run before sending - the manager

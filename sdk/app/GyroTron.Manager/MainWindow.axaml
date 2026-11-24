@@ -34,17 +34,34 @@
         </ScrollViewer>
       </Border>
       <Border Grid.Column="2" x:Name="LibraryPane" Classes="card" BorderThickness="2">
-        <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
-            <StackPanel Grid.Column="0" Spacing="3">
-              <TextBlock Text="YOUR LIBRARY" FontSize="12" FontWeight="Bold" Foreground="#7FE8FF" />
-              <TextBlock x:Name="LibraryPath" Classes="dim" FontSize="10" TextTrimming="CharacterEllipsis" />
+        <Grid RowDefinitions="Auto,Auto,*">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+              <Button x:Name="LibraryTabButton" Content="LIBRARY" FontSize="11" Padding="10,4" />
+              <Button x:Name="CatalogTabButton" Content="CATALOG" FontSize="11" Padding="10,4" />
             </StackPanel>
             <Button Grid.Column="1" x:Name="OpenFolderButton" Content="Open folder" FontSize="11"
                     Padding="10,5" VerticalAlignment="Top" />
           </Grid>
-          <ScrollViewer Grid.Row="1">
-            <StackPanel x:Name="LibraryPanel" Spacing="10" />
+          <!-- One of the two heads, and one of the two lists, is visible at a time. -->
+          <StackPanel Grid.Row="1" x:Name="LibraryHead" Spacing="3" Margin="0,0,0,12">
+            <TextBlock Text="YOUR LIBRARY" FontSize="12" FontWeight="Bold" Foreground="#7FE8FF" />
+            <TextBlock x:Name="LibraryPath" Classes="dim" FontSize="10" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+          <StackPanel Grid.Row="1" x:Name="CatalogHead" Spacing="3" Margin="0,0,0,12" IsVisible="False">
+            <TextBlock Text="CATALOG" FontSize="12" FontWeight="Bold" Foreground="#7FE8FF" />
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Grid.Column="0" x:Name="CatalogStatus" Classes="dim" FontSize="10"
+                         TextTrimming="CharacterEllipsis" />
+              <Button Grid.Column="1" x:Name="CatalogRefreshButton" Content="Refresh" FontSize="10"
+                      Padding="8,3" VerticalAlignment="Top" />
+            </Grid>
+          </StackPanel>
+          <ScrollViewer Grid.Row="2">
+            <StackPanel>
+              <StackPanel x:Name="LibraryPanel" Spacing="10" />
+              <StackPanel x:Name="CatalogPanel" Spacing="10" IsVisible="False" />
+            </StackPanel>
           </ScrollViewer>
         </Grid>
       </Border>

@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "loader/sig.h"
 #include "tat/tat_api.h"
 
 #ifdef __cplusplus

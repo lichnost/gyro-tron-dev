@@ -31,6 +31,9 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+sys.path.insert(0, HERE)
+import tatpkg  # noqa: E402  the container's shared parse/sign module, same directory
+
 MAGIC = b"TATPKG\0\x01"
 KIND_GAME = 1   # the kind byte is part of the frozen header; values 2+ are unassigned
 
@@ -359,6 +362,21 @@ def build_package(game_dir, out, verbose=False, gcc=None, work_root=None, skin=N
         print(f"  {label:<12} {len(payload) / 1024:7.1f} KB")
 
 
+def sign_in_place(out, key_path):
+    """Append the SIG section to the freshly written package. The key file is the
+    signing seed (hex, one line - tools/tatpkg.py genkey writes it); the private half
+    of the official channel's key lives in CI variables, never in this repo."""
+    with open(out, "rb") as f:
+        data = f.read()
+    signed = tatpkg.sign_package(data, tatpkg.read_seed(key_path))
+    with open(out, "wb") as f:
+        f.write(signed)
+    state, detail = tatpkg.verify_signature(signed, keys=tatpkg.trusted_keys())
+    print(f"  signed ({detail})")
+    if state != tatpkg.SIG_VALID:
+        sys.exit(f"the fresh signature does not verify: {detail}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="pack a game into a .tat")
     ap.add_argument("game_dir", help="a directory with game.json, .c sources and assets/")
@@ -367,10 +385,14 @@ def main():
     ap.add_argument("--gcc", help="the xtensa gcc to use (the firmware build passes its own)")
     ap.add_argument("--work", help="where intermediate files go (default build/tat)")
     ap.add_argument("--skin", help="a folder of files that replace the game's assets of the same name")
+    ap.add_argument("--sign", metavar="KEYFILE",
+                    help="append a SIG section with this Ed25519 seed file (the official channel's key)")
     args = ap.parse_args()
 
     out = args.out or os.path.join(ROOT, "build", os.path.basename(args.game_dir.rstrip("/\\")) + ".tat")
     build_package(args.game_dir, out, args.verbose, args.gcc, args.work, args.skin)
+    if args.sign:
+        sign_in_place(out, args.sign)
 
 
 if __name__ == "__main__":

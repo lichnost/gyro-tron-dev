@@ -1,9 +1,22 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Crypto.Signers;
 
 namespace GyroTron.Manager.Link;
+
+/// <summary>The verdict on a package's SIG section. A broken or unknown-key signature
+/// is not a state - it fails the parse, the way any other damage does.</summary>
+public enum SignatureState
+{
+    /// <summary>No SIG section: everything packed before signatures, and every community package.</summary>
+    None,
+    /// <summary>Verified against one of the trusted keys - the official channel.</summary>
+    Valid,
+}
 
 /// <summary>
 /// Just enough of a .tat to decide whether it is worth sending: the header, and the checks
@@ -11,7 +24,10 @@ namespace GyroTron.Manager.Link;
 /// truncated on its way to you, is refused in a moment rather than after a transfer that
 /// takes half a minute - and the reason can name the game.
 ///
-/// The layout is docs/reference/GAME_API.md section 2, written by tools/mktat.py.
+/// The layout is docs/reference/GAME_API.md section 2, written by tools/mktat.py. The
+/// SIG section (signatures) is parsed and verified here too: a broken signature fails
+/// the parse outright, because a tampered official package is exactly the thing this
+/// app must never install.
 /// </summary>
 public sealed record TatPackage(
     string Id, string Name, string Author,
@@ -27,8 +43,40 @@ public sealed record TatPackage(
     /// <summary>The game's own icon as a PNG, if it packed one.</summary>
     public byte[]? IconPng { get; init; }
 
+    /// <summary>The SIG section's verdict, and which key id it was made with.</summary>
+    public SignatureState Signature { get; init; }
+    public int SignatureKeyId { get; init; }
+
     /// <summary>The same rule the console applies: same major, and a minor it can satisfy.</summary>
     public bool RunsOn(int major, int minor) => ApiMajor == major && ApiMinor <= minor;
+
+    // ------------------------------------------------------------------ trusted keys
+
+    /// <summary>
+    /// The keys a SIG section may verify against: the official channel's table plus
+    /// whatever GYROTRON_TAT_PUBKEYS adds ("id:hex" pairs, comma separated, bare hex
+    /// meaning id 0) - the same env the Python tools read, so a local catalog's keys can
+    /// be trusted everywhere at once. The table here, in components/loader/keys.c and in
+    /// tools/tatpkg.py is one table in three spellings; rotation changes all three.
+    /// </summary>
+    public static IReadOnlyList<(byte Id, byte[] Key)> TrustedKeys { get; } = LoadTrustedKeys();
+
+    static List<(byte, byte[])> LoadTrustedKeys()
+    {
+        var keys = new List<(byte, byte[])>
+        {
+            (0, Convert.FromHexString("9ece320a08a2b66f0ba3f594d05cdab3d4c345688571f9d89c00953080868213")),
+        };
+        foreach (var item in (Environment.GetEnvironmentVariable("GYROTRON_TAT_PUBKEYS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = item.Trim().Split(':', 2);
+            var hex = parts.Length == 2 ? parts[1].Trim() : parts[0].Trim();
+            var id = parts.Length == 2 ? byte.Parse(parts[0]) : (byte)0;
+            keys.RemoveAll(k => k.Item1 == id);   // an env key overrides the built-in with the same id
+            keys.Add((id, Convert.FromHexString(hex)));
+        }
+        return keys;
+    }
 
     public static TatPackage Read(string path) => Parse(File.ReadAllBytes(path));
 
@@ -71,10 +119,13 @@ public sealed record TatPackage(
                 throw new InvalidDataException("its id is not a plain name");
         if (kind != KindGame) throw new InvalidDataException("it is not a game");
 
-        // Every section carries its own CRC. Checking them all costs nothing at these sizes
-        // and means a file that was damaged on the watch, or on its way back from one, is
-        // never quietly filed away as a good copy.
+        // Every section carries its own CRC, except SIG: its table entry is 0 by format
+        // rule (a CRC over the signature bytes would be circular - the signature covers
+        // the entry that would carry the CRC). Checking the rest costs nothing at these
+        // sizes and means a file that was damaged on the watch, or on its way back from
+        // one, is never quietly filed away as a good copy.
         byte[]? icon = null;
+        int sigOffset = -1, sigLen = 0;
         for (var i = 0; i < sections; i++)
         {
             var entry = span.Slice(HeaderBytes + i * 16, 16);
@@ -84,12 +135,48 @@ public sealed record TatPackage(
             var crc = BinaryPrimitives.ReadUInt32LittleEndian(entry[12..]);
             if ((ulong)off + len > (ulong)bytes.Length) throw new InvalidDataException("a section runs past the end");
             var payload = span.Slice((int)off, (int)len);
+            if (tag == "SIG ")
+            {
+                if (sigOffset >= 0) throw new InvalidDataException("it carries two signatures");
+                if (crc != 0 || len != 65 || (ulong)off + len != (ulong)bytes.Length)
+                    throw new InvalidDataException("its signature section is malformed");
+                sigOffset = (int)off;
+                sigLen = (int)len;
+                continue;
+            }
             if (Crc32(payload) != crc) throw new InvalidDataException("it is damaged");
             if (tag == "ICON" && icon is null) icon = payload.ToArray();
         }
 
+        var signature = SignatureState.None;
+        var signatureKeyId = 0;
+        if (sigOffset >= 0)
+        {
+            var keyId = bytes[sigOffset];
+            var key = FindKey(keyId);
+            // The signature covers everything before it: header, table, every other
+            // section - so nothing about the package can change after signing.
+            if (key is null)
+                throw new InvalidDataException($"it is signed with key {keyId}, which this app does not know");
+            var signer = new Ed25519Signer();
+            signer.Init(false, new Ed25519PublicKeyParameters(key, 0));
+            signer.BlockUpdate(bytes, 0, sigOffset);
+            if (!signer.VerifySignature(bytes[(sigOffset + 1)..]))
+                throw new InvalidDataException("its signature is broken - the package has been changed since it was signed");
+            signature = SignatureState.Valid;
+            signatureKeyId = keyId;
+        }
+
         return new TatPackage(id, name, author, version, apiMajor, apiMinor,
-                              bytes[88], bytes[89], bytes[90], kind, bytes.Length) { IconPng = icon };
+                              bytes[88], bytes[89], bytes[90], kind, bytes.Length)
+        { IconPng = icon, Signature = signature, SignatureKeyId = signatureKeyId };
+    }
+
+    static byte[]? FindKey(byte id)
+    {
+        foreach (var (kid, key) in TrustedKeys)
+            if (kid == id) return key;
+        return null;
     }
 
     static string Str(ReadOnlySpan<byte> fixedField)

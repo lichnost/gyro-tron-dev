@@ -26,6 +26,14 @@ int main(int argc, char **argv)
     const tat_game_t *d = loader_descriptor(g);
     printf("\nRESULT: loaded - the watch would run this package\n");
     printf("  descriptor %p, magic %08x\n", (const void *)d, d ? d->magic : 0);
+    // What the install-time signature check would say (sig.c). The loader itself never
+    // checks signatures at launch, so this is the one host-side place the verdict exists
+    // - the line to read when a catalog package installs nowhere.
+    const loader_sig_t sig = loader_verify_signature_file(argv[1]);
+    printf("  signature: %s\n",
+           sig == LOADER_SIG_VALID ? "verified (official channel)"
+           : sig == LOADER_SIG_ABSENT ? "none - a community or pre-signature package"
+           : "BROKEN, or signed with a key this firmware does not know");
     int n = loader_asset_count(g);
     for (int i = 0; i < n; i++)
         printf("  asset %d: %s (%d bytes)\n", i, loader_asset_name(g, i),

@@ -26,6 +26,9 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+    <!-- Ed25519 verification of package signatures: .NET has none of its own. Verify
+         only - signing lives in the catalog pipeline, never in this app. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
   </ItemGroup>
 
 </Project>

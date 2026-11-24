@@ -256,6 +256,8 @@ def load_tat(path):
         sys.exit("no gcc or clang found: the loader probe needs one to compile loader.c")
     sources = [os.path.join(ROOT, "components", "loader", "loader.c"),
                os.path.join(ROOT, "components", "loader", "exports.c"),
+               os.path.join(ROOT, "components", "loader", "sig.c"),
+               os.path.join(ROOT, "components", "loader", "keys.c"),
                os.path.join(HERE, "loader_probe.c")]
     watched = sources + glob.glob(os.path.join(ROOT, "components", "**", "*.h"), recursive=True) \
         + glob.glob(os.path.join(HERE, "loadstubs", "**", "*.h"), recursive=True)

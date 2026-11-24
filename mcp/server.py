@@ -19,7 +19,6 @@ import subprocess
 import sys
 import time
 import traceback
-import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tatref
@@ -515,6 +514,22 @@ def tool_screenshot(a):
 
 # ---- .tat validation, per docs/reference/GAME_API.md section 2
 
+_tatpkg_mod = None
+
+
+def _tatpkg():
+    """The container's shared parse/sign module (tools/tatpkg.py here, sdk/tools/ in the
+    standalone install), so this validator and the packer cannot drift apart. Imported
+    lazily: ROOT is only resolved once a tool call needs it."""
+    global _tatpkg_mod
+    if _tatpkg_mod is None:
+        tools = p("tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        import tatpkg
+        _tatpkg_mod = tatpkg
+    return _tatpkg_mod
+
 
 def tool_validate_package(a):
     path = a["path"]
@@ -526,93 +541,32 @@ def tool_validate_package(a):
         data = open(path, "rb").read()
     except OSError as e:
         return {"error": f"cannot read {path}: {e}"}
-    errors, checks = [], []
     if len(data) < 96 or data[:7] != b"TATPKG\x00":
         return {"error": "not a .tat package (bad magic)"}
-    fmt_ver = data[7]
-    checks.append(("format version", fmt_ver == 1, f"{fmt_ver}"))
-    if fmt_ver != 1:
-        errors.append(f"unknown format version {fmt_ver}")
 
-    (total_size,) = _u32(data, 12)
-    kind = data[16]
-    api_maj = _u16(data, 18)[0]
-    api_min = _u16(data, 20)[0]
-    pkg_ver = _u16(data, 22)[0]
-    pid = data[24:40].split(b"\x00")[0].decode("ascii", "replace")
-    name = data[40:64].split(b"\x00")[0].decode("utf-8", "replace")
-    author = data[64:88].split(b"\x00")[0].decode("utf-8", "replace")
-    accent = tuple(data[88:91])
-    (section_count,) = _u16(data, 92)
-
-    hdr_crc = zlib.crc32(data[12:96 + 16 * section_count]) & 0xFFFFFFFF
-    (stored_crc,) = _u32(data, 8)
-    checks.append(("header crc32", hdr_crc == stored_crc,
-                   f"stored {stored_crc:#010x} computed {hdr_crc:#010x}"))
-    if hdr_crc != stored_crc:
-        errors.append("header CRC mismatch")
-    checks.append(("total_size", total_size == len(data), f"{total_size} vs {len(data)}"))
-
-    sections = []
-    for i in range(section_count):
-        off = 96 + 16 * i
-        (soff,) = _u32(data, off + 4)
-        (ssize,) = _u32(data, off + 8)
-        (scrc,) = _u32(data, off + 12)
-        label = data[off:off + 4].decode("ascii", "replace")
-        body = data[soff:soff + ssize]
-        ok = len(body) == ssize and (zlib.crc32(body) & 0xFFFFFFFF) == scrc
-        if not ok:
-            errors.append(f"section {label}: bad size or CRC")
-        info = {"type": label, "offset": soff, "size": ssize, "crc_ok": ok}
-        if label == "ASST" and ssize >= 16:
-            info["asset"] = body[:16].split(b"\x00")[0].decode("utf-8", "replace")
-        sections.append(info)
-
-    api = api_constants()
-    compatible = None
-    if kind == 1:
-        compatible = (api_maj == api["major"] and api_min <= api["minor"])
-        checks.append(("api version", compatible,
-                       f"package {api_maj}.{api_min}, this repo {api['major']}.{api['minor']}"))
-        if not compatible:
-            errors.append("api version: this watch firmware would grey the icon out")
-    else:
-        # The loader refuses anything but KIND_GAME, so the validator says the same.
-        errors.append(f"kind {kind}: only KIND_GAME (1) exists, values 2+ are unassigned")
-
-    icon = {}
-    for s in sections:
-        if s["type"] == "ICON":
-            png = data[s["offset"]:s["offset"] + s["size"]]
-            w = h = None
-            if png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 24:
-                w = int.from_bytes(png[16:20], "big")
-                h = int.from_bytes(png[20:24], "big")
-            icon = {"bytes": s["size"], "png": png[:8] == b"\x89PNG\r\n\x1a\n", "width": w, "height": h}
-            if s["size"] > 4096:
-                errors.append(f"icon is {s['size']} bytes, limit 4096")
-            if w and (w > 232 or h > 232):
-                errors.append(f"icon is {w}x{h}, launcher decodes at most 232x232")
-            if w and (w < 200 or h < 200):
-                errors.append(f"icon is {w}x{h}, expected 210x210")
-
-    return {
-        "path": path.replace("\\", "/"), "ok": not errors, "errors": errors,
-        "kind": "GAME" if kind == 1 else kind, "id": pid, "name": name, "author": author,
-        "version": pkg_ver, "accent_rgb": list(accent), "bytes": len(data),
-        "api": {"major": api_maj, "minor": api_min},
-        "icon": icon, "sections": sections,
-        "checks": [{"check": c, "ok": ok, "detail": d} for c, ok, d in checks],
+    v = _tatpkg().parse(data, api=api_constants())
+    out = {
+        "path": path.replace("\\", "/"), "ok": v["ok"], "errors": list(v["errors"]),
+        "kind": v["kind"], "id": v["id"], "name": v["name"], "author": v["author"],
+        "version": v["version"], "accent_rgb": v["accent_rgb"], "bytes": v["bytes"],
+        "api": v["api"], "icon": v["icon"], "sections": v["sections"],
+        "checks": v["checks"],
     }
 
-
-def _u32(b, off):
-    return (int.from_bytes(b[off:off + 4], "little"),)
-
-
-def _u16(b, off):
-    return (int.from_bytes(b[off:off + 2], "little"),)
+    # The SIG section: presence is a fact of the file, validity is checked against the
+    # keys this build trusts (the official table, plus GYROTRON_TAT_PUBKEYS for local
+    # keys). A present-but-broken signature fails the whole verdict - that is the one
+    # damage a validator exists to catch.
+    state, detail = _tatpkg().verify_signature(data)
+    if v["signature"]["present"]:
+        out["signature"] = {"present": True, "key_id": v["signature"].get("key_id"),
+                            "valid": state == "valid", "detail": detail}
+        if state != "valid":
+            out["ok"] = False
+            out["errors"].append(f"signature: {detail}")
+    else:
+        out["signature"] = {"present": False}
+    return out
 
 
 def _watch_diagnostics():

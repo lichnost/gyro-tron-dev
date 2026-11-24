@@ -79,10 +79,13 @@ CONSOLE_SOURCES = [
 # The console's own screens, which are not games: `emu.py play @boot`. Each screen
 # compiles alongside just the console sources it stands on; @home adds the launcher
 # and the code-drawn icons it hangs the carousel on; @update is the firmware-update
-# screen with its pull-OTA client faked (EMU_OTA, EMU_USB - see emu_core.cpp); @cal is
-# Settings > CALIBRATE straight up, for scripted runs with EMU_ACC_* faults injected.
+# screen with its pull-OTA client faked (EMU_OTA, EMU_USB - see emu_core.cpp); @store
+# is the game store with its catalog fetcher faked (EMU_STORE - a local folder with
+# index-watch.json and the packages, see emu_core.cpp); @cal is Settings > CALIBRATE
+# straight up, for scripted runs with EMU_ACC_* faults injected.
 SCREENS = {"@boot": "EMU_SCREEN_BOOT", "@power": "EMU_SCREEN_POWER", "@hold": "EMU_SCREEN_HOLD",
-           "@home": "EMU_SCREEN_HOME", "@update": "EMU_SCREEN_UPDATE", "@cal": "EMU_SCREEN_CAL"}
+           "@home": "EMU_SCREEN_HOME", "@update": "EMU_SCREEN_UPDATE", "@store": "EMU_SCREEN_STORE",
+           "@cal": "EMU_SCREEN_CAL"}
 SCREEN_SOURCES = {
     "default": [
         "components/wc_console/boot_anim.cpp",
@@ -95,6 +98,12 @@ SCREEN_SOURCES = {
     "@update": [
         "components/wc_console/update_app.cpp",
         "components/wc_console/wifi_setup.cpp",
+    ],
+    "@store": [
+        "components/wc_console/store_app.cpp",
+        "components/wc_console/store_index.cpp",
+        "components/wc_console/wifi_setup.cpp",
+        "components/wc_console/scroll_list.cpp",
     ],
     "@cal": [
         "components/wc_console/calibrate_app.cpp",

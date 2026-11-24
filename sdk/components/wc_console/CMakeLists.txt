@@ -1,6 +1,6 @@
 idf_component_register(
-    SRCS "console.cpp" "tiltcal_store.cpp" "launcher.cpp" "icons.cpp" "settings_app.cpp" "calibrate_app.cpp" "pause_menu.cpp" "power_menu.cpp" "boot_anim.cpp" "boot_splash.cpp" "banner.cpp" "update_app.cpp" "wifi_setup.cpp" "scroll_list.cpp" "theme.cpp"
+    SRCS "console.cpp" "tiltcal_store.cpp" "launcher.cpp" "icons.cpp" "settings_app.cpp" "calibrate_app.cpp" "pause_menu.cpp" "power_menu.cpp" "boot_anim.cpp" "boot_splash.cpp" "banner.cpp" "update_app.cpp" "store_app.cpp" "store_index.cpp" "wifi_setup.cpp" "scroll_list.cpp" "theme.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES engine board net storage audio lodepng json esp_system esp_app_format nvs_flash espcoredump
+    REQUIRES engine board net storage audio lodepng json esp_system esp_app_format nvs_flash espcoredump loader
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)

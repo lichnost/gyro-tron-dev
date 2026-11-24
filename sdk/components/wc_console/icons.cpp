@@ -179,6 +179,25 @@ void tiltatris(Color *buf, int r)
     });
 }
 
+void store(Color *buf, int r)
+{
+    // A shopping bag seen from the front, with a download arrow where the label would be.
+    static constexpr Color EDGE = rgb(70, 74, 92), BG = rgb(24, 44, 34), BAG = rgb(46, 140, 92),
+                           BAG_D = rgb(30, 96, 64), ARROW = rgb(238, 242, 248), HANDLE = rgb(210, 216, 226);
+    forEach(buf, r, [&](float nd, float, float x, float y) -> Color {
+        if (nd > 0.955f) return EDGE;
+        // The handle: a ring whose lower half is hidden behind the bag's top edge.
+        const float hd = std::sqrt(x * x + (y + 0.18f) * (y + 0.18f));
+        if (hd > 0.34f && hd < 0.44f && y < -0.18f) return HANDLE;
+        if (x < -0.52f || x > 0.52f || y < -0.30f || y > 0.68f) return BG;
+        if (y < -0.22f) return BAG_D;   // the folded top edge
+        // The arrow: shaft down, then the head.
+        if (std::fabs(x) < 0.09f && y > -0.04f && y < 0.28f) return ARROW;
+        if (y > 0.16f && y < 0.34f && std::fabs(std::fabs(x) + (y - 0.16f) - 0.18f) < 0.045f) return ARROW;
+        return BAG;
+    });
+}
+
 void clock(Color *buf, int r)
 {
     // Fallback only (the real icon is a PNG): a gold pocket watch with a cream dial.

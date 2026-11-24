@@ -36,6 +36,19 @@ EMU_OTA=available EMU_USB=1 python tools/emu/emu.py shot @update \
   "wait 1; tap 233 133; wait 1.5; tap 233 133; wait 0.3; tap 161 391; wait 4.6; shot ready.png"
 ```
 
+`@store` is the game store with its catalog fetcher faked: `EMU_STORE` names a local
+folder holding `index-watch.json` (the compact catalog, docs/reference/CATALOG.md) and
+the packages, named by their catalog-relative paths (`games/official/echo.tat`). An
+index fetch reads the file after a short delay; a package "download" copies it into
+`Games/` over about a second, progress on the ring. Installs are remembered for the
+session, so a script can walk the whole flow - list, detail, install, back to the list
+with the game marked installed:
+
+```bash
+EMU_STORE=build/emu/store-mock python tools/emu/emu.py shot @store \
+  "wait 1.5; tap 233 125; wait 0.5; shot detail.png; tap 153 390; wait 2.5; shot installed.png"
+```
+
 `@cal` is Settings > CALIBRATE straight up, for scripted runs of the calibration flow
 (docs/reference/CALIBRATION.md). The synthetic sensor is perfect by default, and a perfect sensor
 cannot be calibrated - every pose reads the same gravity - so the flow's fit correctly

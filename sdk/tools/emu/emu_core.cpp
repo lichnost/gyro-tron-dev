@@ -48,7 +48,7 @@
 // alongside only the console sources it stands on (emu.py's SCREEN_SOURCES), so each pulls
 // in just its own headers.
 #if defined(EMU_SCREEN_BOOT) || defined(EMU_SCREEN_POWER) || defined(EMU_SCREEN_HOLD) || defined(EMU_SCREEN_HOME) || \
-    defined(EMU_SCREEN_UPDATE) || defined(EMU_SCREEN_CAL)
+    defined(EMU_SCREEN_UPDATE) || defined(EMU_SCREEN_CAL) || defined(EMU_SCREEN_STORE)
 #define EMU_SCREEN 1
 #endif
 #ifdef EMU_SCREEN_BOOT
@@ -69,6 +69,12 @@
 #ifdef EMU_SCREEN_CAL
 #include "console/calibrate_app.h"
 #include "console/console.h"
+#endif
+#ifdef EMU_SCREEN_STORE
+#include "console/store_app.h"
+#endif
+#ifdef EMU_SCREEN_STORE
+#include "console/store_app.h"
 #endif
 #ifndef EMU_SCREEN
 extern "C" const tat_game_t tat_game;   // the game this library was built around
@@ -349,7 +355,7 @@ const void *loader_asset_data(loader_game_t *, int, size_t *) { return nullptr; 
 // The PMU is a chip. The screens that show the battery or ask whether the cable is in
 // are told about it through the environment - EMU_BATTERY, EMU_CHARGING, EMU_USB - so a
 // scripted run can show any state of charge or of plug.
-#if defined(EMU_SCREEN_HOME) || defined(EMU_SCREEN_UPDATE)
+#if defined(EMU_SCREEN_HOME) || defined(EMU_SCREEN_UPDATE) || defined(EMU_SCREEN_STORE)
 extern "C" {
 static bool emu_env_flag(const char *name)
 {
@@ -536,6 +542,217 @@ esp_err_t ota_pull_apply(void)
 
 }  // extern "C"
 #endif  // EMU_SCREEN_UPDATE
+
+// ------------------------------------------------------------------ the store screen
+
+#ifdef EMU_SCREEN_STORE
+// The store stands on the net component's catalog fetcher and on the loader/storage
+// pair, none of which belong in an emulator. The fakes: the watch is always on Wi-Fi,
+// and the catalog fetcher is a small state machine driven by EMU_STORE - a local
+// folder holding index-watch.json and the packages (named by their catalog-relative
+// paths, e.g. games/official/pindrop.tat). An index fetch reads the file in after a
+// short delay (so the FETCHING screen is seeable); a package "download" copies it
+// into Games/ over about a second, progress on the ring. Installs are remembered for
+// the session, so a scripted run can walk list -> detail -> install -> INSTALLED.
+#include <cctype>
+
+extern "C" {
+
+net_state_t net_state(void) { return NET_CONNECTED; }
+bool net_saved_ssid(char *out, size_t len) { snprintf(out, len, "EMU-NET"); return true; }
+const char *net_ip(void) { return "192.168.1.42"; }
+bool net_join_saved(uint32_t) { return true; }
+bool net_join(const char *, const char *, uint32_t) { return true; }
+int net_scan(net_ap_t *out, int max)
+{
+    // Two networks, so the setup screen has something to show if a script opens it.
+    if (max > 0) { snprintf(out[0].ssid, sizeof(out[0].ssid), "EMU-NET"); out[0].rssi = -40; out[0].secure = true; }
+    if (max > 1) { snprintf(out[1].ssid, sizeof(out[1].ssid), "NEIGHBOUR"); out[1].rssi = -65; out[1].secure = true; }
+    return max > 1 ? 2 : 1;
+}
+bool net_enabled(void) { return true; }
+void net_set_enabled(bool) {}
+void storage_changed(void) {}
+
+bool storage_free_bytes(uint32_t *total, uint32_t *free_bytes)
+{
+    *total = 16u * 1024 * 1024;
+    *free_bytes = 8u * 1024 * 1024;
+    return true;
+}
+
+static char s_store_dir[256];
+static const char *store_dir()
+{
+    const char *v = std::getenv("EMU_STORE");
+    if (!v || !v[0]) v = ".";
+    snprintf(s_store_dir, sizeof(s_store_dir), "%s", v);
+    return s_store_dir;
+}
+
+// ---------------- the fake catalog fetcher
+
+static store_status_t s_index_st, s_pkg_st;
+static char *s_body = nullptr;   // holds the last fetched index until the next fetch
+static int64_t s_started_us;
+static char s_pkg_from[512], s_pkg_to[160];
+static uint32_t s_pkg_len;
+
+bool store_index_fetch(void)
+{
+    if (s_index_st.state == STORE_FETCHING) return false;
+    free(s_body);
+    s_body = nullptr;
+    FILE *f = fopen((std::string(store_dir()) + "/index-watch.json").c_str(), "rb");
+    if (!f) {
+        snprintf(s_index_st.error, sizeof(s_index_st.error), "no catalog on the site (404)");
+        s_index_st.state = STORE_FAILED;
+        return true;
+    }
+    fseek(f, 0, SEEK_END);
+    const long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    s_body = static_cast<char *>(malloc(len + 1));
+    const size_t got = s_body ? fread(s_body, 1, len, f) : 0;
+    fclose(f);
+    if (!s_body || got != (size_t)len) {
+        free(s_body);
+        s_body = nullptr;
+        snprintf(s_index_st.error, sizeof(s_index_st.error), "empty reply from the site");
+        s_index_st.state = STORE_FAILED;
+        return true;
+    }
+    s_body[len] = 0;
+    s_index_st.state = STORE_FETCHING;
+    s_index_st.error[0] = 0;
+    s_started_us = esp_timer_get_time();
+    return true;
+}
+
+const char *store_index_body(void) { return s_body; }
+
+static void poll_index()
+{
+    if (s_index_st.state != STORE_FETCHING) return;
+    if (esp_timer_get_time() - s_started_us < 600000) return;   // seeable, then done
+    s_index_st.state = STORE_OK;
+    s_index_st.received = s_index_st.total = (uint32_t)strlen(s_body);
+}
+
+void store_index_status(store_status_t *out)
+{
+    poll_index();
+    *out = s_index_st;
+}
+
+bool store_package_fetch(const char *url, const char *dest_path, const char *sha256_hex, uint32_t size)
+{
+    (void)sha256_hex;
+    if (s_pkg_st.state == STORE_FETCHING) return false;
+    snprintf(s_pkg_from, sizeof(s_pkg_from), "%s/%s", store_dir(), url);
+    snprintf(s_pkg_to, sizeof(s_pkg_to), "%s.part", dest_path);
+    FILE *f = fopen(s_pkg_from, "rb");
+    if (!f) {
+        snprintf(s_pkg_st.error, sizeof(s_pkg_st.error), "the package is not on the site (404)");
+        s_pkg_st.state = STORE_FAILED;
+        return true;
+    }
+    fseek(f, 0, SEEK_END);
+    s_pkg_len = (uint32_t)ftell(f);
+    fclose(f);
+    (void)size;
+    s_pkg_st.state = STORE_FETCHING;
+    s_pkg_st.error[0] = 0;
+    s_pkg_st.total = s_pkg_len;
+    s_pkg_st.received = 0;
+    s_started_us = esp_timer_get_time();
+    return true;
+}
+
+void store_package_status(store_status_t *out)
+{
+    if (s_pkg_st.state == STORE_FETCHING) {
+        const int64_t dt = esp_timer_get_time() - s_started_us;
+        s_pkg_st.received = (uint32_t)((uint64_t)s_pkg_len * dt / 1500000);
+        if (s_pkg_st.received >= s_pkg_len) {
+            // "Finished": copy the bytes into Games/, then the rename the loader sees.
+            FILE *in = fopen(s_pkg_from, "rb");
+            FILE *dst = fopen(s_pkg_to, "wb");
+            if (in && dst) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, dst);
+            }
+            if (in) fclose(in);
+            if (dst) fclose(dst);
+            char final_path[160];
+            snprintf(final_path, sizeof(final_path), "%s", s_pkg_to);
+            final_path[strlen(final_path) - 5] = 0;   // drop ".part"
+            remove(final_path);
+            rename(s_pkg_to, final_path);
+            s_pkg_st.received = s_pkg_len;
+            s_pkg_st.state = STORE_OK;
+        }
+    }
+    *out = s_pkg_st;
+}
+
+void store_fetch_cancel(void)
+{
+    if (s_pkg_st.state == STORE_FETCHING) {
+        snprintf(s_pkg_st.error, sizeof(s_pkg_st.error), "cancelled");
+        s_pkg_st.state = STORE_FAILED;
+    }
+    if (s_index_st.state == STORE_FETCHING) s_index_st.state = STORE_FAILED;
+}
+
+bool store_fetch_active(void) { return s_index_st.state == STORE_FETCHING || s_pkg_st.state == STORE_FETCHING; }
+
+// ---------------- a stand-in for the loader's games-folder view
+
+// The store's view of what is installed: the packages the fake store has put in
+// Games/ this session (the fake fetcher writes real files there), so a scripted run
+// sees INSTALLED after an install. MSVC has no dirent, so no directory scan - the
+// list grows from the fetcher's own record.
+static loader_entry_t s_installed[LOADER_MAX_GAMES];
+static int s_installed_n;
+
+static void add_installed(const char *id)
+{
+    if (s_installed_n >= LOADER_MAX_GAMES) return;
+    for (int i = 0; i < s_installed_n; i++)
+        if (strcmp(s_installed[i].id, id) == 0) return;
+    loader_entry_t &e = s_installed[s_installed_n];
+    memset(&e, 0, sizeof(e));
+    snprintf(e.path, sizeof(e.path), "Games/%s.tat", id);
+    snprintf(e.id, sizeof(e.id), "%s", id);   // the real loader reports the package's own id, lowercase
+    snprintf(e.name, sizeof(e.name), "%s", id);
+    for (char *c = e.name; *c; c++) *c = (char)toupper((unsigned char)*c);
+    e.version = 1;
+    e.api_major = TAT_API_MAJOR;
+    e.api_minor = TAT_API_MINOR;
+    e.size = s_pkg_len;
+    s_installed_n++;
+}
+
+int loader_scan(loader_entry_t *out, int max)
+{
+    if (s_pkg_st.state == STORE_OK) {
+        const char *base = strrchr(s_pkg_to, '/');
+        base = base ? base + 1 : s_pkg_to;
+        const char *dot = strstr(base, ".tat.part");   // strrchr would find ".part"'s dot first
+        if (dot) add_installed(std::string(base, dot - base).c_str());
+        s_pkg_st.state = STORE_OK;   // stay; add_installed only acts on a fresh install's path
+    }
+    const int n = std::min(s_installed_n, max);
+    for (int i = 0; i < n; i++) out[i] = s_installed[i];
+    return n;
+}
+
+const char *loader_games_dir(void) { return "Games"; }
+
+}  // extern "C"
+#endif  // EMU_SCREEN_STORE
 
 // ------------------------------------------------------------------ NVS, in a file
 
@@ -862,6 +1079,10 @@ EMU_API int emu_begin(void)
 #elif defined(EMU_SCREEN_UPDATE)
     ota_pull_init();
     s_game = new console::UpdateApp(&s_home);
+#elif defined(EMU_SCREEN_STORE)
+    s_game = new console::StoreApp(&s_home);
+#elif defined(EMU_SCREEN_STORE)
+    s_game = new console::StoreApp(&s_home);
 #elif defined(EMU_SCREEN_CAL)
     console::loadTiltCalibration();   // also hands the refresher its save hook
     s_game = new console::CalibrateApp(&s_home);

@@ -142,8 +142,11 @@ void ota_get_status(ota_status_t *out);
 // turn an update into a recovery, and a cable takes that moment off the table.
 //
 // The site address is one constant on purpose: it ships in every build, and a manifest that
-// asks the watch to fetch its image from somewhere else is refused.
-#define TAT_OTA_BASE_URL "https://tat.secstant.ru"   // serves /firmware/version.json (see site/)
+// asks the watch to fetch its image from somewhere else is refused. Plain HTTP on purpose:
+// every fetch is hash-checked (SHA-256 in the manifest / the catalog entry), so the
+// transport adds no integrity the hashes don't already give - only a certificate story
+// the watch's root store would have to believe.
+#define TAT_OTA_BASE_URL "http://tat.secstant.ru"   // serves /firmware/version.json (see site/)
 
 typedef struct {
     char version[32];    // "0.9.10" - for the UI
@@ -193,6 +196,44 @@ void ota_pull_cancel(void);
 bool ota_power_ok(void);
 // Switch the boot slot and restart. ESP_ERR_INVALID_STATE without power or a verified image.
 esp_err_t ota_pull_apply(void);
+
+// ---------------------------------------------------------------- game catalog (the store app)
+// The catalog is static files behind the same host as the firmware OTA data
+// (docs/reference/CATALOG.md): /otadb/games/index-watch.json and, per entry,
+// /otadb/games/<channel>/<id>.tat. Same plumbing as the pull-OTA client: a short-lived
+// worker task per fetch, status polled by the UI, SHA-256 checked while the package
+// streams in. One fetch at a time across both kinds.
+#define STORE_INDEX_MAX 32768   // the index budget: anything bigger fails before parsing
+
+typedef enum {
+    STORE_IDLE = 0,
+    STORE_FETCHING,
+    STORE_OK,        // index: body ready; package: written and renamed into place
+    STORE_FAILED,
+} store_state_t;
+
+typedef struct {
+    store_state_t state;
+    uint32_t received, total;
+    char error[48];
+} store_status_t;
+
+// Fetch the compact index. On STORE_OK the body is in the component's PSRAM buffer,
+// NUL-terminated, valid until the next fetch.
+bool store_index_fetch(void);
+void store_index_status(store_status_t *out);
+const char *store_index_body(void);
+
+// Download one package to dest_path (a .tat path under the games folder): writes
+// dest_path.part while streaming, checks sha256_hex (64 hex chars) and the size, then
+// renames into place - a half-written file is never visible to the loader's scan.
+bool store_package_fetch(const char *url, const char *dest_path, const char *sha256_hex, uint32_t size);
+void store_package_status(store_status_t *out);
+
+// Stop the running fetch. The index body becomes invalid; a package fetch removes its
+// .part file.
+void store_fetch_cancel(void);
+bool store_fetch_active(void);
 
 // ---------------------------------------------------------------- update mode
 // Set a flag and reboot; the next boot runs the update screen instead of the launcher.

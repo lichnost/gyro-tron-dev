@@ -118,7 +118,10 @@ def load_entry(path):
 
 def rmtree_ro(path):
     """rmtree that clears the read-only bit git puts on its object files - a plain
-    rmtree dies on Windows the moment a .git directory is involved."""
+    rmtree dies on Windows the moment a .git directory is involved. A path that does
+    not exist yet (a fresh work dir) is already as clean as it needs to be."""
+    if not os.path.exists(path):
+        return
     def relax(func, p, _exc):
         os.chmod(p, 0o666)
         func(p)

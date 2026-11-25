@@ -31,8 +31,11 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-sys.path.insert(0, HERE)
-import tatpkg  # noqa: E402  the container's shared parse/sign module, same directory
+# the shared module lives beside the backend tools here and beside this file in the
+# exported SDK (sdk/tools/) - take whichever of the two exists
+_backend_tools = os.path.join(ROOT, "backend", "tools")
+sys.path.insert(0, _backend_tools if os.path.isdir(_backend_tools) else HERE)
+import tatpkg  # noqa: E402  the container's shared parse/sign module
 
 MAGIC = b"TATPKG\0\x01"
 KIND_GAME = 1   # the kind byte is part of the frozen header; values 2+ are unassigned
@@ -364,7 +367,7 @@ def build_package(game_dir, out, verbose=False, gcc=None, work_root=None, skin=N
 
 def sign_in_place(out, key_path):
     """Append the SIG section to the freshly written package. The key file is the
-    signing seed (hex, one line - tools/tatpkg.py genkey writes it); the private half
+    signing seed (hex, one line - backend/tools/tatpkg.py genkey writes it); the private half
     of the official channel's key lives in CI variables, never in this repo."""
     with open(out, "rb") as f:
         data = f.read()

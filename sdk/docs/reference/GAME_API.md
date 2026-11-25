@@ -111,7 +111,7 @@ has. Verification runs at install time - the manager checks before sending
 (`TatPackage.cs`), the watch's store checks what it downloads
 (`loader_verify_signature` in `components/loader/sig.c`) - and never at launch, so boot
 stays as fast as it is today. The trusted public keys sit in `components/loader/keys.c`,
-`tools/tatpkg.py` and `TatPackage.cs`; `tests/test_tat_format.py` fails if the three
+`backend/tools/tatpkg.py` and `TatPackage.cs`; `tests/test_tat_format.py` fails if the three
 copies drift apart.
 
 **Where the checks run.** Sending a `.tat` is an ordinary `FS_PUT` (§7): the link writes

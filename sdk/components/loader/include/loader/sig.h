@@ -29,7 +29,7 @@ typedef enum {
 
 // One trusted public key, selected by the key-id byte inside the SIG section. Rotation
 // is a new key with a new id; old and new stay compiled in together. Private halves
-// live only in catalog CI variables - the same table exists in tools/tatpkg.py and the
+// live only in catalog CI variables - the same table exists in backend/tools/tatpkg.py and the
 // manager's TatPackage.cs, and the three must not drift.
 typedef struct {
     uint8_t key_id;

@@ -1,7 +1,7 @@
 """Build the game catalog: walk a staging tree, validate every package, sign the
 official ones, emit the deploy tree and the two index variants.
 
-    python tools/make_catalog.py <staging> [--out build/catalog-out] [--sign-key FILE]
+    python make_catalog.py <staging> [--out build/catalog-out] [--sign-key FILE]
                                 [--api 1.9] [--generated "2026-11-24T12:00:00Z"]
 
 The staging tree is git-reviewed state, one folder per game:
@@ -12,7 +12,7 @@ The staging tree is git-reviewed state, one folder per game:
     <staging>/revoked.txt      optional: one revoked package sha256 per line
 
 Out comes what rsync puts on the host (docs/reference/CATALOG.md has the layout and
-the index schemas; index urls are relative to the /otadb/ root):
+the index schemas; index urls are relative to the root of the device host):
 
     <out>/games/index.json  index-watch.json  official/<id>.tat  community/<id>.tat
     <out>/games/img/<id>-icon.png  img/<id>-<n>.png
@@ -37,7 +37,7 @@ import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))
 
 sys.path.insert(0, HERE)
 import tatpkg  # noqa: E402  the shared container parse/sign module

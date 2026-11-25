@@ -1,6 +1,6 @@
 """Collect community catalog entries from the registry into a staging tree.
 
-    python tools/collect_registry.py <registry-dir> <staging-out> [--mktat PATH] [--work DIR]
+    python collect_registry.py <registry-dir> <staging-out> [--mktat PATH] [--work DIR]
 
 The registry directory holds one JSON file per game (this is `gyro-tron-games`'
 `registry/`; the same file shape its PR review approves):
@@ -34,7 +34,7 @@ asset provenance. `package` and `dir` are mutually exclusive and both must be
 repo-relative paths without "..".
 
 The output is `staging-out/community/<id>/` - the `.tat`, `summary.txt`, any
-`shots-*.png` found beside the game - ready for `tools/make_catalog.py`, which runs
+`shots-*.png` found beside the game - ready for `make_catalog.py` beside it, which runs
 the full validation on top of this. Collected packages are also checked here so a
 mismatched id or a smuggled signature is named at the collecting step, not buried in
 the catalog build.
@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))
 
 sys.path.insert(0, HERE)
 import tatpkg  # noqa: E402  the shared container parse module
@@ -225,7 +225,7 @@ def main():
     ap = argparse.ArgumentParser(description="collect registry entries into a community staging tree")
     ap.add_argument("registry", help="the registry directory (one .json per game)")
     ap.add_argument("staging", help="the staging tree to fill (its community/ is rebuilt)")
-    ap.add_argument("--mktat", default=os.path.join(HERE, "mktat.py"),
+    ap.add_argument("--mktat", default=os.path.join(ROOT, "tools", "mktat.py"),
                     help="the packer to build source entries with (default: this repo's)")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "registry-collect"),
                     help="where clones go (default build/registry-collect)")

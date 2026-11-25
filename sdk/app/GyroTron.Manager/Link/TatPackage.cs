@@ -57,7 +57,7 @@ public sealed record TatPackage(
     /// whatever GYROTRON_TAT_PUBKEYS adds ("id:hex" pairs, comma separated, bare hex
     /// meaning id 0) - the same env the Python tools read, so a local catalog's keys can
     /// be trusted everywhere at once. The table here, in components/loader/keys.c and in
-    /// tools/tatpkg.py is one table in three spellings; rotation changes all three.
+    /// backend/tools/tatpkg.py is one table in three spellings; rotation changes all three.
     /// </summary>
     public static IReadOnlyList<(byte Id, byte[] Key)> TrustedKeys { get; } = LoadTrustedKeys();
 

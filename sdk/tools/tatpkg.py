@@ -22,8 +22,8 @@ signature. An absent SIG section on an old package is normal and installs as eve
 
 Command line:
 
-    python tools/tatpkg.py verify <file.tat>...    container + signature verdict
-    python tools/tatpkg.py genkey <seed-file> <pub-file>
+    python tatpkg.py verify <file.tat>...    container + signature verdict
+    python tatpkg.py genkey <seed-file> <pub-file>
         Generate an Ed25519 keypair, hex one per line. The seed file is SECRET: the
         official channel's seed lives only in catalog CI variables, never in a repo.
 """

@@ -10,7 +10,7 @@
 
 namespace console {
 
-// Same cap as the builder's (tools/make_catalog.py MAX_GAMES) - the builder refuses to
+// Same cap as the builder's (backend/tools/make_catalog.py MAX_GAMES) - the builder refuses to
 // emit more, and this parser refuses to hold more.
 constexpr int STORE_MAX_GAMES = 200;
 // The revoked list is bounded the same way; a hostile or mis-built index past it fails.

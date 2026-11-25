@@ -25,19 +25,19 @@ public sealed record CatalogEntry(
 public sealed record CatalogResult(List<CatalogEntry> Games, bool FromCache, string Generated, string? Error);
 
 /// <summary>
-/// The catalog the pane browses: index.json fetched over HTTPS, cached on disk so the
+/// The catalog the pane browses: index.json fetched over plain HTTP (every package is signature-checked), cached on disk so the
 /// pane still works offline, packages downloaded into the library on request. The
 /// catalog is only a source of bytes - downloading goes through Library.Add and
 /// installing through Library.Install, so there is exactly one install path.
 ///
-/// Urls in the index are relative to the /otadb/ root, which is two levels up from the
-/// index itself (.../otadb/games/index.json); GYROTRON_CATALOG_URL points somewhere
+/// Urls in the index are relative to the device host's root, which is two levels up from the
+/// index itself (.../games/index.json); GYROTRON_CATALOG_URL points somewhere
 /// else entirely (a local mock, a mirror) when set.
 /// </summary>
 public sealed class CatalogService
 {
     /// <summary>The default catalog, on the same host the watch's firmware updates come from.</summary>
-    public const string DefaultIndexUrl = "http://tat.secstant.ru/otadb/games/index.json";
+    public const string DefaultIndexUrl = "http://gyro-asset.sctntapi.com/games/index.json";
 
     public string IndexUrl { get; }
     public string CachePath { get; }
@@ -119,8 +119,8 @@ public sealed class CatalogService
         return Http.GetByteArrayAsync(Resolve(url)).GetAwaiter().GetResult();
     }
 
-    /// <summary>Index urls are /otadb/-relative; the index sits two directories down
-    /// (.../otadb/games/index.json), so the base is its grandparent.</summary>
+    /// <summary>Index urls are relative to the device host's root; the index sits two directories down
+    /// (.../games/index.json), so the base is its grandparent.</summary>
     string Resolve(string url)
     {
         var uri = new Uri(IndexUrl);

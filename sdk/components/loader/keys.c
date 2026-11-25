@@ -1,5 +1,5 @@
 // The console's trusted package-signing keys. The private halves live only in catalog
-// CI variables; this table (and its twins in tools/tatpkg.py and the manager's
+// CI variables; this table (and its twins in backend/tools/tatpkg.py and the manager's
 // TatPackage.cs) is the whole public side. Rotation adds a row with a fresh key id -
 // old rows stay, so firmware updated past a rotation still accepts everything signed
 // before it.

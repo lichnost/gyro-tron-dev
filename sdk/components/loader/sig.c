@@ -5,7 +5,7 @@
 // in nothing beyond the C library. The arithmetic is the widely-reviewed TweetNaCl
 // shape (16 signed 64-bit limbs, radix 2^16); the point equation is the non-cofactored
 // check of RFC 8032, s*B == R + h*A, which is what the Python reference in
-// tools/tatpkg.py checks too - tests/test_sig.c holds both to the same vectors.
+// backend/tools/tatpkg.py checks too - tests/test_sig.c holds both to the same vectors.
 //
 // Speed is not a goal here: this runs once per install, and a few dozen milliseconds
 // of double-and-add on a 512-bit scalar is nothing next to the download that preceded
@@ -384,7 +384,7 @@ static void point_pack(uint8_t out[32], const point *p)
 }
 
 // Decode a point: recover x from y, matching the sign bit, and refuse anything that is
-// not on the curve. This mirrors tools/tatpkg.py's decode, line for line, so the two
+// not on the curve. This mirrors backend/tools/tatpkg.py's decode, line for line, so the two
 // verifiers accept exactly the same byte strings.
 static int point_unpack(point *p, const uint8_t s[32])
 {

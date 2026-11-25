@@ -603,7 +603,7 @@ bool store_index_fetch(void)
     if (s_index_st.state == STORE_FETCHING) return false;
     free(s_body);
     s_body = nullptr;
-    // The same relative layout the real host serves under /otadb/: the index at
+    // The same relative layout the real host serves at its root: the index at
     // games/index-watch.json, packages at the catalog-relative urls the index names.
     FILE *f = fopen((std::string(store_dir()) + "/games/index-watch.json").c_str(), "rb");
     if (!f) {

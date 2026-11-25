@@ -146,7 +146,7 @@ void ota_get_status(ota_status_t *out);
 // every fetch is hash-checked (SHA-256 in the manifest / the catalog entry), so the
 // transport adds no integrity the hashes don't already give - only a certificate story
 // the watch's root store would have to believe.
-#define TAT_OTA_BASE_URL "http://tat.secstant.ru"   // serves /firmware/version.json (see site/)
+#define TAT_OTA_BASE_URL "http://gyro-asset.sctntapi.com"   // serves /firmware/version.json (see site/)
 
 typedef struct {
     char version[32];    // "0.9.10" - for the UI
@@ -197,10 +197,16 @@ bool ota_power_ok(void);
 // Switch the boot slot and restart. ESP_ERR_INVALID_STATE without power or a verified image.
 esp_err_t ota_pull_apply(void);
 
+// Is `url` an absolute http(s) url on exactly TAT_OTA_BASE_URL? Compared up to the
+// authority's end, never as a bare prefix - "http://<host>.example.com" starts with
+// the base too. Both fetchers (pull OTA and the game store) accept an absolute url
+// only when this holds.
+bool net_url_same_host(const char *url);
+
 // ---------------------------------------------------------------- game catalog (the store app)
 // The catalog is static files behind the same host as the firmware OTA data
-// (docs/reference/CATALOG.md): /otadb/games/index-watch.json and, per entry,
-// /otadb/games/<channel>/<id>.tat. Same plumbing as the pull-OTA client: a short-lived
+// (docs/reference/CATALOG.md): /games/index-watch.json and, per entry,
+// /games/<channel>/<id>.tat. Same plumbing as the pull-OTA client: a short-lived
 // worker task per fetch, status polled by the UI, SHA-256 checked while the package
 // streams in. One fetch at a time across both kinds.
 #define STORE_INDEX_MAX 32768   // the index budget: anything bigger fails before parsing

@@ -204,7 +204,9 @@ bool store_index_parse(const char *body, StoreCatalog &out)
             }
         } while (p.eat(','));
     }
-    if (!p.eat('}') || *p.s) return false;
+    if (!p.eat('}')) return false;
+    p.ws();                       // the builder ends the file with a newline; legal JSON
+    if (*p.s) return false;
     if (!seen_schema || !seen_games) return false;
 
     for (int r = 0; r < revoked_n; r++)
@@ -214,3 +216,4 @@ bool store_index_parse(const char *body, StoreCatalog &out)
 }
 
 }  // namespace console
+

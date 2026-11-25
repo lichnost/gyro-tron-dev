@@ -20,7 +20,7 @@ struct StoreEntry {
     char id[16];
     char name[24];
     char author[24];
-    char summary[64];
+    char summary[65];    // the builder's cap is 64 chars; the parser needs the NUL too
     char url[96];
     char sha[65];        // sha256 of the package, lower-case hex
     uint32_t size;

@@ -548,9 +548,9 @@ esp_err_t ota_pull_apply(void)
 #ifdef EMU_SCREEN_STORE
 // The store stands on the net component's catalog fetcher and on the loader/storage
 // pair, none of which belong in an emulator. The fakes: the watch is always on Wi-Fi,
-// and the catalog fetcher is a small state machine driven by EMU_STORE - a local
-// folder holding index-watch.json and the packages (named by their catalog-relative
-// paths, e.g. games/official/pindrop.tat). An index fetch reads the file in after a
+// and the catalog fetcher is a small state machine driven by EMU_STORE - a local copy
+// of the catalog deploy tree (the index at games/index-watch.json, the packages at the
+// catalog-relative urls the index names). An index fetch reads the file in after a
 // short delay (so the FETCHING screen is seeable); a package "download" copies it
 // into Games/ over about a second, progress on the ring. Installs are remembered for
 // the session, so a scripted run can walk list -> detail -> install -> INSTALLED.
@@ -603,7 +603,9 @@ bool store_index_fetch(void)
     if (s_index_st.state == STORE_FETCHING) return false;
     free(s_body);
     s_body = nullptr;
-    FILE *f = fopen((std::string(store_dir()) + "/index-watch.json").c_str(), "rb");
+    // The same relative layout the real host serves under /otadb/: the index at
+    // games/index-watch.json, packages at the catalog-relative urls the index names.
+    FILE *f = fopen((std::string(store_dir()) + "/games/index-watch.json").c_str(), "rb");
     if (!f) {
         snprintf(s_index_st.error, sizeof(s_index_st.error), "no catalog on the site (404)");
         s_index_st.state = STORE_FAILED;
@@ -637,6 +639,8 @@ static void poll_index()
     if (esp_timer_get_time() - s_started_us < 600000) return;   // seeable, then done
     s_index_st.state = STORE_OK;
     s_index_st.received = s_index_st.total = (uint32_t)strlen(s_body);
+    // The real fetcher logs the same two lines (game_store.c); scripted runs wait on them.
+    emu_log_line('I', "store", "index fetched (%u bytes)", s_index_st.total);
 }
 
 void store_index_status(store_status_t *out)
@@ -692,6 +696,7 @@ void store_package_status(store_status_t *out)
             rename(s_pkg_to, final_path);
             s_pkg_st.received = s_pkg_len;
             s_pkg_st.state = STORE_OK;
+            emu_log_line('I', "store", "%s installed (%u KB)", final_path, s_pkg_len / 1024);
         }
     }
     *out = s_pkg_st;

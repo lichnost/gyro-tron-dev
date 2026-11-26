@@ -44,6 +44,9 @@ does).
 ## Conventions
 
 Documentation and comments describe functionality as it exists now — no history, no
-"was changed from X to Y". Comments say *why*, not *what*. 4 spaces, 120 columns,
-braces on the same line. The selftest passing is the definition of "done" for `mcp/`
-changes; a compile plus a looked-at screenshot is the definition of "done" for a game.
+"was changed from X to Y". They must not cite plans or their sections either: a plan is
+a backlog or a kept record, not as-built documentation, and citing it is citing history
+by another name — describe the functionality itself. Comments say *why*, not *what*.
+4 spaces, 120 columns, braces on the same line. The selftest passing is the definition
+of "done" for `mcp/` changes; a compile plus a looked-at screenshot is the definition
+of "done" for a game.

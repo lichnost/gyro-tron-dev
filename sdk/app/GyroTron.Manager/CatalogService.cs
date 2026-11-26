@@ -37,7 +37,7 @@ public sealed record CatalogResult(List<CatalogEntry> Games, bool FromCache, str
 public sealed class CatalogService
 {
     /// <summary>The default catalog, on the same host the watch's firmware updates come from.</summary>
-    public const string DefaultIndexUrl = "http://gyro-asset.sctntapi.com/games/index.json";
+    public const string DefaultIndexUrl = "https://gyro-tron.sctntapi.com/games/index.json";
 
     public string IndexUrl { get; }
     public string CachePath { get; }

@@ -146,7 +146,7 @@ void ota_get_status(ota_status_t *out);
 // every fetch is hash-checked (SHA-256 in the manifest / the catalog entry), so the
 // transport adds no integrity the hashes don't already give - only a certificate story
 // the watch's root store would have to believe.
-#define TAT_OTA_BASE_URL "http://gyro-asset.sctntapi.com"   // serves /firmware/version.json (see site/)
+#define TAT_OTA_BASE_URL "http://gyro-tron.sctntapi.com"   // serves /firmware/version.json (see backend/)
 
 typedef struct {
     char version[32];    // "0.9.10" - for the UI

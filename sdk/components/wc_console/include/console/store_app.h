@@ -1,6 +1,6 @@
 // The game store: browse the catalog and install games over Wi-Fi, straight on the
-// watch (docs/plans/GAME_DISTRIBUTION_PLAN.md §6.2, the catalog in
-// docs/reference/CATALOG.md). A built-in console app, not a package: installing means
+// watch (the catalog in docs/reference/CATALOG.md). A built-in console app, not a
+// package: installing means
 // writing into /data/Games, which the loader sandbox rightly forbids a .tat to do.
 //
 // The catalog lives in RAM only while the store is open - one PSRAM parse buffer, one
